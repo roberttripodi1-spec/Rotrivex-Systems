@@ -93,6 +93,7 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
 
     out["target"] = (out["Close"].shift(-1) > out["Close"]).astype(int)
 
+    # Clean up numeric artifacts from pct_change/division operations.
     numeric_cols = out.select_dtypes(include=["number"]).columns
     out[numeric_cols] = out[numeric_cols].replace([np.inf, -np.inf], np.nan)
 
@@ -108,6 +109,7 @@ def download_history(ticker: str, period: str = "5y") -> pd.DataFrame:
 
 
 def train_test_split_time(data: pd.DataFrame, train_size: float = 0.8):
+    split_idx = int(len(data) * train_size)
     x = data[FEATURE_COLUMNS].copy()
     y = data["target"].copy()
 

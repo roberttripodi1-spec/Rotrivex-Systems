@@ -1,12 +1,9 @@
-# Stock Predictor Clean Rebuild
+# Stock Predictor Full Mobile Optimization Cleanup
 
-Full clean rebuild with:
-- single ticker search
-- same-tab green/red S&P 500 movers
-- auto-run when a mover is tapped
-- details, headlines, and share pages
-- mobile-first spacing
-- hamburger-style sidebar toggle
-- bottom navigation
-- custom indicator gauges for mobile
-- feature sanitization in the predictor
+This version does a full mobile cleanup pass:
+- tighter spacing everywhere
+- smaller charts and cards
+- 2-up metric rows instead of wide rows
+- cleaner details layout
+- custom mobile-friendly indicator gauges
+- same-tab movers and full features preserved
