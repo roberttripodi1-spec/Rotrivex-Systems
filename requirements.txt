@@ -1,11 +1,8 @@
-# Stock Predictor Streamlit Rebuild v16
-
-This version is a simplified Streamlit build designed to deploy cleanly on Streamlit Cloud.
-
-## Main file
-- `app.py`
-
-## Notes
-- Uses a sidebar form so it only recomputes when you press **Run dashboard**
-- Uses Streamlit tabs instead of URL-based page switching
-- Includes retries and longer timeouts in `predictor.py`
+pandas
+numpy
+scikit-learn
+yfinance==0.2.66
+streamlit
+plotly
+requests
+qrcode[pil]

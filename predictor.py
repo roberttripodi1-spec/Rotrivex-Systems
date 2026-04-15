@@ -1,464 +1,592 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import urllib.parse
-import xml.etree.ElementTree as ET
-from io import BytesIO
+from dataclasses import dataclass
+from typing import Iterable
 
+import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-import qrcode
-import requests
-import streamlit as st
-
-from predictor import generate_projection_chart_data, train_predict_for_ticker
-
-APP_URL = "https://rotrivex-systems-rbtustwa2cfqcegsrs4zem.streamlit.app/"
-DEFAULT_TICKER = "AAPL"
-
-st.set_page_config(page_title="Stock Predictor", layout="wide", initial_sidebar_state="expanded")
+import yfinance as yf
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score
 
 
-def safe_attr(obj, name, default):
-    return getattr(obj, name, default)
+FEATURE_COLUMNS = [
+    "return_1d",
+    "return_5d",
+    "return_10d",
+    "sma_5",
+    "sma_10",
+    "sma_20",
+    "ema_12",
+    "ema_26",
+    "volatility_10",
+    "volatility_20",
+    "rsi_14",
+    "macd",
+    "signal",
+    "price_vs_sma_20",
+    "volume_change",
+    "hl_range",
+    "oc_change",
+    "Volume",
+]
 
-
-@st.cache_data(ttl=900, show_spinner=False)
-def fetch_live_headlines(ticker: str, limit: int = 8) -> list[dict]:
-    query = urllib.parse.quote(f"{ticker} stock")
-    url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
-    items: list[dict] = []
-    try:
-        response = requests.get(url, timeout=15)
-        response.raise_for_status()
-        root = ET.fromstring(response.content)
-        channel = root.find("channel")
-        if channel is None:
-            return items
-        for item in channel.findall("item")[:limit]:
-            title = item.findtext("title", default="").strip()
-            link = item.findtext("link", default="").strip()
-            pub_date = item.findtext("pubDate", default="").strip()
-            source_el = item.find("source")
-            source = source_el.text.strip() if source_el is not None and source_el.text else ""
-            if title:
-                items.append({"title": title, "link": link, "source": source, "published": pub_date})
-    except Exception:
-        return []
-    return items
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def build_qr_code(url: str) -> bytes:
-    qr = qrcode.make(url)
-    buf = BytesIO()
-    qr.save(buf, format="PNG")
-    return buf.getvalue()
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def run_model(ticker: str, period: str, threshold: float, forecast_days: int, n_sims: int):
-    result = train_predict_for_ticker(ticker, period=period, threshold=threshold)
-    summary, _ = generate_projection_chart_data(result, forecast_days=forecast_days, n_sims=n_sims)
-    headlines = fetch_live_headlines(ticker, limit=8)
-    return result, summary, headlines
-
-
-st.markdown(
-    """
-<style>
-.stApp {
-    background: linear-gradient(180deg, #0b1220 0%, #101828 100%);
-    color: #f8fafc;
+POSITIVE_WORDS = {
+    "beat", "beats", "surge", "surges", "jump", "jumps", "gain", "gains", "bullish",
+    "upgrade", "upgrades", "strong", "growth", "record", "buyback", "expands",
+    "momentum", "profit", "profits", "optimistic", "rally", "rallies", "outperform",
+    "partnership", "launch", "raises", "raised", "improves", "improved"
 }
-.main .block-container {
-    padding-top: 0.8rem;
-    padding-bottom: 2rem;
-    max-width: 1100px;
+NEGATIVE_WORDS = {
+    "miss", "misses", "drop", "drops", "fall", "falls", "weak", "cut", "cuts",
+    "downgrade", "downgrades", "bearish", "lawsuit", "probe", "decline", "declines",
+    "warning", "warns", "risk", "risks", "loss", "losses", "recall", "delay", "delays",
+    "selloff", "sell-off", "pressure", "slowdown", "recession"
 }
-h1, h2, h3 { color: #f8fafc !important; }
-.hero, .card {
-    padding: 0.85rem 0.95rem;
-    border: 1px solid #223046;
-    border-radius: 16px;
-    background: #111827;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.16);
-    margin-bottom: 0.8rem;
-}
-.signal-buy, .signal-sell, .signal-watch {
-    padding: .62rem .76rem;
-    border-radius: 12px;
-    font-weight: 800;
-    text-align: center;
-    margin-bottom: .65rem;
-    font-size: .95rem;
-}
-.signal-buy { background: #0b3b2e; color: #6ee7b7; border: 1px solid #14532d; }
-.signal-sell { background: #4c1717; color: #fca5a5; border: 1px solid #7f1d1d; }
-.signal-watch { background: #5a3b10; color: #fcd34d; border: 1px solid #92400e; }
-.flag {
-    padding: .34rem .56rem;
-    border-radius: 999px;
-    display: inline-block;
-    margin: .14rem .16rem .14rem 0;
-    background: #1b2638;
-    border: 1px solid #314158;
-    color: #e5edf8;
-    font-size: .78rem;
-}
-.headline-card {
-    padding: .72rem .76rem;
-    border: 1px solid #223046;
-    border-radius: 12px;
-    background: #0f172a;
-    margin-bottom: .5rem;
-}
-.headline-source {
-    color: #93c5fd;
-    font-size: .78rem;
-    font-weight: 600;
-}
-.indicator-card {
-    padding: .55rem .55rem;
-    border: 1px solid #223046;
-    border-radius: 12px;
-    background: #0f172a;
-    margin-bottom: .45rem;
-}
-.indicator-title {
-    color: #93c5fd;
-    font-size: .8rem;
-    font-weight: 700;
-    text-align: center;
-}
-.indicator-wrap {
-    position: relative;
-    width: 100%;
-    max-width: 190px;
-    height: 108px;
-    margin: 0 auto;
-}
-.indicator-arch-base, .indicator-arch-fill {
-    position: absolute;
-    left: 50%;
-    top: 10px;
-    transform: translateX(-50%);
-    width: 144px;
-    height: 72px;
-    border-top-left-radius: 144px;
-    border-top-right-radius: 144px;
-    border-bottom: 0;
-    box-sizing: border-box;
-    overflow: hidden;
-}
-.indicator-arch-base { border: 10px solid #223046; }
-.indicator-arch-fill { border: 10px solid transparent; }
-.indicator-value {
-    position: absolute;
-    left: 50%;
-    bottom: 10px;
-    transform: translateX(-50%);
-    color: #f8fafc;
-    font-size: 1rem;
-    font-weight: 800;
-    width: 100%;
-    text-align: center;
-}
-[data-testid="stMetric"] {
-    background: #111827;
-    border: 1px solid #223046;
-    border-radius: 12px;
-    padding: .45rem .5rem;
-}
-.stTabs [data-baseweb="tab-list"] { gap: .25rem; }
-.stTabs [data-baseweb="tab"] {
-    background: #162032;
-    border-radius: 10px 10px 0 0;
-    color: #d9e3f0;
-    padding: .36rem .6rem;
-    font-size: .82rem;
-}
-.stTabs [aria-selected="true"] { background: #24324a !important; }
-@media (max-width: 768px) {
-    .main .block-container { padding-left: 0.55rem; padding-right: 0.55rem; }
-    .indicator-wrap { max-width: 170px; height: 100px; }
-    .indicator-value { font-size: .92rem; }
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
 
 
-def signal_class(signal: str) -> str:
-    return {"BUY": "signal-buy", "SELL": "signal-sell"}.get(signal, "signal-watch")
+def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    rs = gain / loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
 
 
-def build_candlestick_chart(hist: pd.DataFrame, result) -> go.Figure:
-    chart_data = hist.tail(75).copy()
-    chart_data["SMA20"] = chart_data["Close"].rolling(20).mean()
-    current_price = safe_attr(result, "latest_close", float(chart_data["Close"].iloc[-1]))
-    support = safe_attr(result, "support_level", float(chart_data["Low"].tail(30).min()))
-    resistance = safe_attr(result, "resistance_level", float(chart_data["High"].tail(30).max()))
-
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=chart_data.index,
-        open=chart_data["Open"],
-        high=chart_data["High"],
-        low=chart_data["Low"],
-        close=chart_data["Close"],
-        name="Price",
-        increasing_line_color="#34d399",
-        decreasing_line_color="#f87171",
-        increasing_fillcolor="#34d399",
-        decreasing_fillcolor="#f87171",
-    ))
-    fig.add_trace(go.Scatter(
-        x=chart_data.index,
-        y=chart_data["SMA20"],
-        mode="lines",
-        name="20D Avg",
-        line=dict(color="#60a5fa", width=2),
-    ))
-    for y, label, color in [
-        (current_price, "Current", "#cbd5e1"),
-        (support, "Support", "#f59e0b"),
-        (resistance, "Resistance", "#a78bfa"),
-    ]:
-        fig.add_hline(y=y, line_dash="dot", line_color=color, line_width=1.0, annotation_text=label, annotation_position="right", annotation_font_color=color)
-    fig.update_layout(
-        title=f"{safe_attr(result, 'ticker', 'Ticker')} Price",
-        height=380,
-        xaxis_rangeslider_visible=False,
-        template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="#0f172a",
-        margin=dict(l=8, r=8, t=40, b=8),
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0, bgcolor="rgba(0,0,0,0)"),
-        font=dict(color="#e5edf8"),
-        hovermode="x unified",
-    )
-    fig.update_xaxes(showgrid=False, zeroline=False, title=None)
-    fig.update_yaxes(gridcolor="rgba(148,163,184,0.12)", zeroline=False, title=None)
-    return fig
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if isinstance(out.columns, pd.MultiIndex):
+        out.columns = [c[0] for c in out.columns]
+    return out
 
 
-def build_projection_chart(summary: pd.DataFrame, current_price: float) -> go.Figure:
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=summary.index, y=summary["High Band (90%)"], mode="lines", line=dict(color="rgba(96,165,250,0.0)", width=0), showlegend=False))
-    fig.add_trace(go.Scatter(x=summary.index, y=summary["Low Band (10%)"], mode="lines", fill="tonexty", fillcolor="rgba(96,165,250,0.18)", line=dict(color="rgba(96,165,250,0.0)", width=0), name="Projected Range"))
-    fig.add_trace(go.Scatter(x=summary.index, y=summary["Median"], mode="lines", name="Median Path", line=dict(color="#60a5fa", width=3)))
-    fig.add_hline(y=current_price, line_dash="dot", line_color="#cbd5e1", line_width=1.0, annotation_text="Current", annotation_position="right", annotation_font_color="#cbd5e1")
-    fig.update_layout(
-        title="Projection Range",
-        height=270,
-        template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="#0f172a",
-        margin=dict(l=8, r=8, t=40, b=8),
-        font=dict(color="#e5edf8"),
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0, bgcolor="rgba(0,0,0,0)"),
-    )
-    fig.update_xaxes(showgrid=False, zeroline=False, title=None)
-    fig.update_yaxes(gridcolor="rgba(148,163,184,0.12)", zeroline=False, title=None)
-    return fig
+def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
+    out = normalize_columns(df)
+
+    required = {"Open", "High", "Low", "Close", "Volume"}
+    missing = required - set(out.columns)
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    out["return_1d"] = out["Close"].pct_change()
+    out["return_5d"] = out["Close"].pct_change(5)
+    out["return_10d"] = out["Close"].pct_change(10)
+
+    out["sma_5"] = out["Close"].rolling(5).mean()
+    out["sma_10"] = out["Close"].rolling(10).mean()
+    out["sma_20"] = out["Close"].rolling(20).mean()
+    out["sma_50"] = out["Close"].rolling(50).mean()
+    out["ema_12"] = out["Close"].ewm(span=12, adjust=False).mean()
+    out["ema_26"] = out["Close"].ewm(span=26, adjust=False).mean()
+
+    out["volatility_10"] = out["return_1d"].rolling(10).std()
+    out["volatility_20"] = out["return_1d"].rolling(20).std()
+
+    out["rsi_14"] = compute_rsi(out["Close"], 14)
+    out["macd"] = out["ema_12"] - out["ema_26"]
+    out["signal"] = out["macd"].ewm(span=9, adjust=False).mean()
+
+    out["price_vs_sma_20"] = out["Close"] / out["sma_20"]
+    out["volume_change"] = out["Volume"].pct_change()
+    out["hl_range"] = (out["High"] - out["Low"]) / out["Close"]
+    out["oc_change"] = (out["Close"] - out["Open"]) / out["Open"]
+
+    out["target"] = (out["Close"].shift(-1) > out["Close"]).astype(int)
+
+    numeric_cols = out.select_dtypes(include=["number"]).columns
+    out[numeric_cols] = out[numeric_cols].replace([np.inf, -np.inf], np.nan)
+
+    out = out.dropna().copy()
+    return out
 
 
-def build_gauge_html(title: str, value: float, min_value: float, max_value: float, value_fmt: str) -> str:
-    pct = 0.0 if max_value <= min_value else (value - min_value) / (max_value - min_value)
-    pct = max(0.0, min(1.0, pct))
-    deg = 180 * pct
+def download_history(ticker: str, period: str = "5y") -> pd.DataFrame:
+    t = ticker.upper().strip()
+    attempts = [
+        {"period": period, "timeout": 30},
+        {"period": period, "timeout": 45},
+        {"period": "2y", "timeout": 30},
+        {"period": "1y", "timeout": 30},
+        {"period": "6mo", "timeout": 20},
+    ]
 
-    if value_fmt == "pct0":
-        display_value = f"{value:.0f}"
-    elif value_fmt == "float2":
-        display_value = f"{value:.2f}"
-    else:
-        display_value = f"{value}"
-
-    return f"""
-    <div class="indicator-card">
-        <div class="indicator-title">{title}</div>
-        <div class="indicator-wrap">
-            <div class="indicator-arch-base"></div>
-            <div class="indicator-arch-fill">
-                <div style="
-                    position:absolute;
-                    inset:0;
-                    background:conic-gradient(from 180deg, #60a5fa 0deg, #60a5fa {deg}deg, transparent {deg}deg, transparent 180deg);
-                    -webkit-mask: radial-gradient(circle at 50% 100%, transparent 44px, black 45px);
-                    mask: radial-gradient(circle at 50% 100%, transparent 44px, black 45px);
-                "></div>
-            </div>
-            <div class="indicator-value">{display_value}</div>
-        </div>
-    </div>
-    """
-
-
-if "last_run" not in st.session_state:
-    st.session_state.last_run = {
-        "ticker": DEFAULT_TICKER,
-        "period": "1y",
-        "threshold": 0.55,
-        "forecast_days": 20,
-        "n_sims": 200,
-    }
-
-header_left, header_right = st.columns([3, 1])
-with header_left:
-    st.markdown('<div class="hero">', unsafe_allow_html=True)
-    st.title("Stock Predictor")
-    st.caption("Fast, simplified Streamlit build with safer market-data fallback.")
-    st.markdown('</div>', unsafe_allow_html=True)
-with header_right:
-    st.link_button("Open share link", APP_URL, use_container_width=True)
-
-with st.sidebar:
-    st.markdown("### Search ticker")
-    with st.form("controls"):
-        ticker = st.text_input("Ticker", value=st.session_state.last_run["ticker"]).strip().upper() or DEFAULT_TICKER
-        period = st.selectbox("History period", options=["6mo", "1y", "2y", "5y"], index=["6mo", "1y", "2y", "5y"].index(st.session_state.last_run["period"]))
-        threshold = st.slider("Signal threshold", min_value=0.50, max_value=0.75, value=float(st.session_state.last_run["threshold"]), step=0.01)
-        forecast_days = st.slider("Projection days", min_value=5, max_value=60, value=int(st.session_state.last_run["forecast_days"]), step=5)
-        n_sims = st.slider("Projection paths", min_value=50, max_value=500, value=int(st.session_state.last_run["n_sims"]), step=50)
-        submitted = st.form_submit_button("Run dashboard", use_container_width=True)
-
-if submitted:
-    st.session_state.last_run = {
-        "ticker": ticker,
-        "period": period,
-        "threshold": threshold,
-        "forecast_days": forecast_days,
-        "n_sims": n_sims,
-    }
-
-params = st.session_state.last_run
-result = None
-summary = None
-headlines: list[dict] = []
-error_text = None
-
-try:
-    with st.spinner(f"Loading {params['ticker']}..."):
-        result, summary, headlines = run_model(
-            params["ticker"],
-            params["period"],
-            float(params["threshold"]),
-            int(params["forecast_days"]),
-            int(params["n_sims"]),
-        )
-except Exception as exc:
-    error_text = str(exc)
-
-if error_text:
-    st.error(
-        f"Could not load market data for {params['ticker']} right now. "
-        f"Try period 6mo or 1y and rerun.\n\nDetails: {error_text}"
-    )
-    st.stop()
-
-st.markdown(f'<div class="{signal_class(safe_attr(result, "model_signal", "WATCH"))}">{safe_attr(result, "model_signal", "WATCH")}</div>', unsafe_allow_html=True)
-
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Price", f"${safe_attr(result, 'latest_close', 0.0):,.2f}")
-m2.metric("Up probability", f"{safe_attr(result, 'next_day_up_probability', 0.5):.2%}")
-m3.metric("Accuracy", f"{safe_attr(result, 'holdout_accuracy', 0.0):.2%}")
-m4.metric("Mood", safe_attr(result, "mood", "Neutral"))
-
-m5, m6, m7, m8 = st.columns(4)
-m5.metric("Momentum", f"{safe_attr(result, 'momentum_20d', 0.0):.2%}")
-m6.metric("Volume", f"{safe_attr(result, 'volume_ratio', 1.0):.2f}x")
-m7.metric("News tone", safe_attr(result, "sentiment_label", "Neutral"))
-m8.metric("Earnings", safe_attr(result, "earnings_flag", "No date found"))
-
-tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Details", "Headlines", "Share"])
-
-with tab1:
-    st.plotly_chart(build_candlestick_chart(result.history, result), use_container_width=True)
-    st.plotly_chart(build_projection_chart(summary, safe_attr(result, "latest_close", 0.0)), use_container_width=True)
-
-with tab2:
-    left, right = st.columns(2)
-    with left:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("Indicators")
-        rsi_value = max(0.0, min(100.0, float(safe_attr(result, "rsi_14", 50.0))))
-        sentiment_value = max(-1.0, min(1.0, float(safe_attr(result, "sentiment_score", 0.0))))
-        g1, g2 = st.columns(2)
-        with g1:
-            st.markdown(build_gauge_html("RSI", rsi_value, 0, 100, "pct0"), unsafe_allow_html=True)
-        with g2:
-            st.markdown(build_gauge_html("News Sentiment", sentiment_value, -1, 1, "float2"), unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("Key levels")
-        levels_df = pd.DataFrame({
-            "Item": ["Support", "Resistance", "Stop loss", "Target 1", "Target 2"],
-            "Value": [
-                safe_attr(result, "support_level", 0.0),
-                safe_attr(result, "resistance_level", 0.0),
-                safe_attr(result, "stop_loss", 0.0),
-                safe_attr(result, "target_1", 0.0),
-                safe_attr(result, "target_2", 0.0),
-            ],
-        })
-        levels_df["Value"] = levels_df["Value"].map(lambda x: f"${x:,.2f}")
-        st.dataframe(levels_df, use_container_width=True, hide_index=True)
-        st.markdown("**Flags**")
-        flags = safe_attr(result, "watchlist_flags", ["No major alert flags"])
-        st.markdown("".join([f'<span class="flag">{flag}</span>' for flag in flags]), unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    with right:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("Model summary")
-        rsi = safe_attr(result, "rsi_14", 50.0)
-        notes = [
-            f"Signal is {safe_attr(result, 'model_signal', 'WATCH')}.",
-            f"RSI is {'high' if rsi > 70 else 'low' if rsi < 40 else 'middle-range'} at {rsi:.1f}.",
-            f"Price is {'above' if safe_attr(result, 'latest_close', 0.0) > safe_attr(result, 'sma20', 0.0) else 'below'} the 20-day average.",
-            f"MACD is {'above' if safe_attr(result, 'macd', 0.0) > safe_attr(result, 'macd_signal', 0.0) else 'below'} its signal line.",
-            f"Earnings status is {safe_attr(result, 'earnings_flag', 'No date found')}."
-        ]
-        st.markdown("<ul>" + "".join([f"<li>{n}</li>" for n in notes]) + "</ul>", unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("Feature importance")
-        feature_df = pd.DataFrame(safe_attr(result, "top_features", []), columns=["Feature", "Importance"])
-        if not feature_df.empty:
-            feature_df["Importance"] = feature_df["Importance"].map(lambda x: f"{x:.3f}")
-            st.dataframe(feature_df, use_container_width=True, hide_index=True)
-        else:
-            st.write("No feature importance data available.")
-        st.markdown('</div>', unsafe_allow_html=True)
-
-with tab3:
-    if headlines:
-        st.caption(f"Latest headlines for {params['ticker']}")
-        for item in headlines:
-            source_line = " • ".join([x for x in [item.get("source", ""), item.get("published", "")] if x])
-            st.markdown(
-                f"""
-                <div class="headline-card">
-                    <div class="headline-source">{source_line}</div>
-                    <div style="margin-top:.22rem;">
-                        <a href="{item.get('link', '#')}" target="_blank" style="color:#f8fafc; text-decoration:none; font-weight:600;">{item.get('title', '')}</a>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
+    last_error = None
+    for attempt in attempts:
+        try:
+            data = yf.download(
+                t,
+                period=attempt["period"],
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+                timeout=attempt["timeout"],
+                repair=True,
             )
-    else:
-        st.info("No live headlines available right now.")
+            data = normalize_columns(data)
+            if data is not None and not data.empty:
+                return data
+        except Exception as exc:
+            last_error = exc
 
-with tab4:
-    ticker_url = f"{APP_URL}?ticker={params['ticker']}"
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.subheader("Share this ticker")
-    st.code(ticker_url, language=None)
-    st.image(build_qr_code(ticker_url), caption="Scan to open this ticker on your phone", width=160)
-    st.markdown('</div>', unsafe_allow_html=True)
+    if last_error is not None:
+        raise ValueError(
+            f"Market data request timed out or failed for {t}. "
+            f"Yahoo Finance did not return usable data after multiple retries."
+        ) from last_error
+
+    raise ValueError(
+        f"No market data returned for {t}. Try again in a minute or use a shorter history period."
+    )
+
+
+def train_test_split_time(data: pd.DataFrame, train_size: float = 0.8):
+    x = data[FEATURE_COLUMNS].copy()
+    y = data["target"].copy()
+
+    x = x.replace([np.inf, -np.inf], np.nan)
+    valid_mask = x.notna().all(axis=1) & y.notna()
+
+    x = x.loc[valid_mask]
+    y = y.loc[valid_mask]
+
+    split_idx = int(len(x) * train_size)
+    return x.iloc[:split_idx], x.iloc[split_idx:], y.iloc[:split_idx], y.iloc[split_idx:]
+
+
+def derive_signal(prob: float, price: float, sma20: float, rsi: float, macd: float, macd_signal: float) -> str:
+    if prob >= 0.60 and price >= sma20 and rsi < 72 and macd >= macd_signal:
+        return "BUY"
+    if prob <= 0.40 and price < sma20 and macd < macd_signal:
+        return "SELL"
+    return "WATCH"
+
+
+def generate_trade_levels(history: pd.DataFrame, latest_close: float) -> dict:
+    recent = history.tail(30).copy()
+    support = float(recent["Low"].min())
+    resistance = float(recent["High"].max())
+    atr_proxy = float((recent["High"] - recent["Low"]).rolling(14).mean().dropna().iloc[-1]) if len(recent) >= 14 else float((recent["High"] - recent["Low"]).mean())
+
+    stop_loss = max(0.01, latest_close - atr_proxy * 1.25)
+    target_1 = latest_close + atr_proxy * 1.0
+    target_2 = latest_close + atr_proxy * 2.0
+    risk = max(0.01, latest_close - stop_loss)
+    reward_1 = max(0.0, target_1 - latest_close)
+    reward_2 = max(0.0, target_2 - latest_close)
+
+    return {
+        "support_level": support,
+        "resistance_level": resistance,
+        "stop_loss": stop_loss,
+        "target_1": target_1,
+        "target_2": target_2,
+        "rr_1": reward_1 / risk if risk else np.nan,
+        "rr_2": reward_2 / risk if risk else np.nan,
+    }
+
+
+def market_mood(prob: float, rsi: float, price: float, sma20: float, sma50: float) -> str:
+    score = 0
+    if prob > 0.55:
+        score += 1
+    if rsi > 55:
+        score += 1
+    if price > sma20:
+        score += 1
+    if price > sma50:
+        score += 1
+    if score >= 4:
+        return "Bullish"
+    if score >= 2:
+        return "Neutral"
+    return "Bearish"
+
+
+def _safe_to_datetime(value):
+    if value is None:
+        return None
+    try:
+        ts = pd.to_datetime(value)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        return ts
+    except Exception:
+        return None
+
+
+def get_earnings_info(ticker: str) -> dict:
+    out = {
+        "earnings_date": None,
+        "days_to_earnings": None,
+        "earnings_flag": "No date found",
+    }
+    try:
+        tk = yf.Ticker(ticker)
+        possible = []
+
+        cal = tk.calendar
+        if isinstance(cal, pd.DataFrame) and not cal.empty:
+            for value in cal.values.flatten():
+                possible.append(value)
+        elif isinstance(cal, dict):
+            for value in cal.values():
+                possible.append(value)
+
+        parsed = None
+        for value in possible:
+            parsed = _safe_to_datetime(value)
+            if parsed is not None:
+                break
+
+        if parsed is not None:
+            now = pd.Timestamp.now(tz="UTC")
+            delta = (parsed.normalize() - now.normalize()).days
+            out["earnings_date"] = parsed.date().isoformat()
+            out["days_to_earnings"] = int(delta)
+            if delta < 0:
+                out["earnings_flag"] = "Recent earnings"
+            elif delta <= 7:
+                out["earnings_flag"] = "Earnings soon"
+            elif delta <= 30:
+                out["earnings_flag"] = "Upcoming earnings"
+            else:
+                out["earnings_flag"] = "Earnings later"
+    except Exception:
+        pass
+
+    return out
+
+
+def get_news_sentiment(ticker: str, max_items: int = 8) -> dict:
+    result = {
+        "sentiment_score": 0.0,
+        "sentiment_label": "Neutral",
+        "headline_count": 0,
+        "headlines": [],
+    }
+    try:
+        tk = yf.Ticker(ticker)
+        news_items = getattr(tk, "news", []) or []
+        selected = news_items[:max_items]
+
+        score = 0
+        headlines = []
+        for item in selected:
+            title = str(item.get("title", "")).strip()
+            if not title:
+                continue
+            lower = title.lower()
+            pos_hits = sum(1 for w in POSITIVE_WORDS if w in lower)
+            neg_hits = sum(1 for w in NEGATIVE_WORDS if w in lower)
+            score += (pos_hits - neg_hits)
+            headlines.append(title)
+
+        count = len(headlines)
+        avg = float(score / count) if count else 0.0
+
+        label = "Neutral"
+        if avg >= 0.35:
+            label = "Positive"
+        elif avg <= -0.35:
+            label = "Negative"
+
+        result.update({
+            "sentiment_score": avg,
+            "sentiment_label": label,
+            "headline_count": count,
+            "headlines": headlines,
+        })
+    except Exception:
+        pass
+
+    return result
+
+
+def build_watchlist_flags(
+    signal: str,
+    mood: str,
+    volume_ratio: float,
+    earnings_days: int | None,
+    sentiment_label: str,
+    range_position: float,
+    rsi: float,
+) -> list[str]:
+    flags = []
+
+    if signal == "BUY" and mood == "Bullish":
+        flags.append("Trend setup aligned")
+    if volume_ratio >= 1.5:
+        flags.append("Volume expansion")
+    if earnings_days is not None and 0 <= earnings_days <= 7:
+        flags.append("Earnings risk this week")
+    if sentiment_label == "Positive":
+        flags.append("Positive headline tone")
+    if sentiment_label == "Negative":
+        flags.append("Negative headline tone")
+    if range_position >= 0.85:
+        flags.append("Near 52-week highs")
+    if range_position <= 0.20:
+        flags.append("Near 52-week lows")
+    if rsi >= 70:
+        flags.append("Momentum overheated")
+    if rsi <= 35:
+        flags.append("Momentum washed out")
+
+    if not flags:
+        flags.append("No major alert flags")
+    return flags
+
+
+@dataclass
+class ModelResult:
+    ticker: str
+    rows_used: int
+    holdout_accuracy: float
+    next_day_up_probability: float
+    latest_close: float
+    latest_date: str
+    top_features: list[tuple[str, float]]
+    strategy_return: float
+    buy_hold_return: float
+    history: pd.DataFrame
+    features_data: pd.DataFrame
+    model_signal: str
+    support_level: float
+    resistance_level: float
+    stop_loss: float
+    target_1: float
+    target_2: float
+    rr_1: float
+    rr_2: float
+    rsi_14: float
+    macd: float
+    macd_signal: float
+    sma20: float
+    sma50: float
+    volume_ratio: float
+    momentum_20d: float
+    volatility_20: float
+    range_52w_position: float
+    mood: str
+    earnings_date: str | None
+    days_to_earnings: int | None
+    earnings_flag: str
+    sentiment_score: float
+    sentiment_label: str
+    headline_count: int
+    headlines: list[str]
+    watchlist_flags: list[str]
+
+
+def train_predict_for_ticker(ticker: str, period: str = "5y", threshold: float = 0.55) -> ModelResult:
+    raw = download_history(ticker, period=period)
+    hist = raw.copy()
+    data = prepare_features(raw)
+
+    if len(data) < 200:
+        raise ValueError(f"Not enough history for {ticker}")
+
+    x_train, x_test, y_train, y_test = train_test_split_time(data)
+
+    if len(x_train) < 50 or len(x_test) < 10:
+        raise ValueError(f"Not enough clean training data for {ticker}")
+
+    model = RandomForestClassifier(
+        n_estimators=300,
+        max_depth=8,
+        min_samples_split=10,
+        min_samples_leaf=5,
+        random_state=42,
+        class_weight="balanced_subsample",
+        n_jobs=-1,
+    )
+    model.fit(x_train, y_train)
+
+    preds = model.predict(x_test)
+    probs = model.predict_proba(x_test)[:, 1]
+    acc = accuracy_score(y_test, preds)
+
+    latest = data.iloc[[-1]]
+    next_up_prob = float(model.predict_proba(latest[FEATURE_COLUMNS])[:, 1][0])
+
+    test_slice = data.iloc[len(x_train):].copy()
+    test_slice["up_prob"] = probs
+    test_slice["signal"] = (test_slice["up_prob"] >= threshold).astype(int)
+    test_slice["market_return"] = test_slice["Close"].pct_change().fillna(0.0)
+    test_slice["strategy_return"] = test_slice["signal"].shift(1).fillna(0) * test_slice["market_return"]
+
+    strategy_total = float((1 + test_slice["strategy_return"]).prod() - 1)
+    buy_hold_total = float((1 + test_slice["market_return"]).prod() - 1)
+
+    importances = (
+        pd.Series(model.feature_importances_, index=FEATURE_COLUMNS)
+        .sort_values(ascending=False)
+        .head(8)
+    )
+
+    latest_close = float(data["Close"].iloc[-1])
+    latest_sma20 = float(data["sma_20"].iloc[-1])
+    latest_sma50 = float(data["sma_50"].iloc[-1]) if "sma_50" in data.columns else latest_sma20
+    latest_rsi = float(data["rsi_14"].iloc[-1])
+    latest_macd = float(data["macd"].iloc[-1])
+    latest_macd_signal = float(data["signal"].iloc[-1])
+    volume_ratio = float(hist["Volume"].iloc[-1] / hist["Volume"].tail(20).mean()) if hist["Volume"].tail(20).mean() else np.nan
+    momentum_20d = float(hist["Close"].pct_change(20).iloc[-1])
+    volatility_20 = float(data["volatility_20"].iloc[-1])
+
+    trailing_252 = hist.tail(min(252, len(hist)))
+    range_low = float(trailing_252["Low"].min())
+    range_high = float(trailing_252["High"].max())
+    range_52w_position = (latest_close - range_low) / max(0.01, (range_high - range_low))
+
+    model_signal = derive_signal(next_up_prob, latest_close, latest_sma20, latest_rsi, latest_macd, latest_macd_signal)
+    levels = generate_trade_levels(hist, latest_close)
+    mood = market_mood(next_up_prob, latest_rsi, latest_close, latest_sma20, latest_sma50)
+    earnings = get_earnings_info(ticker)
+    news = get_news_sentiment(ticker)
+    flags = build_watchlist_flags(
+        signal=model_signal,
+        mood=mood,
+        volume_ratio=volume_ratio,
+        earnings_days=earnings["days_to_earnings"],
+        sentiment_label=news["sentiment_label"],
+        range_position=float(range_52w_position),
+        rsi=latest_rsi,
+    )
+
+    return ModelResult(
+        ticker=ticker.upper(),
+        rows_used=len(data),
+        holdout_accuracy=float(acc),
+        next_day_up_probability=next_up_prob,
+        latest_close=latest_close,
+        latest_date=str(data.index[-1].date()),
+        top_features=[(k, float(v)) for k, v in importances.items()],
+        strategy_return=strategy_total,
+        buy_hold_return=buy_hold_total,
+        history=hist,
+        features_data=data,
+        model_signal=model_signal,
+        support_level=levels["support_level"],
+        resistance_level=levels["resistance_level"],
+        stop_loss=levels["stop_loss"],
+        target_1=levels["target_1"],
+        target_2=levels["target_2"],
+        rr_1=levels["rr_1"],
+        rr_2=levels["rr_2"],
+        rsi_14=latest_rsi,
+        macd=latest_macd,
+        macd_signal=latest_macd_signal,
+        sma20=latest_sma20,
+        sma50=latest_sma50,
+        volume_ratio=volume_ratio,
+        momentum_20d=momentum_20d,
+        volatility_20=volatility_20,
+        range_52w_position=float(range_52w_position),
+        mood=mood,
+        earnings_date=earnings["earnings_date"],
+        days_to_earnings=earnings["days_to_earnings"],
+        earnings_flag=earnings["earnings_flag"],
+        sentiment_score=news["sentiment_score"],
+        sentiment_label=news["sentiment_label"],
+        headline_count=news["headline_count"],
+        headlines=news["headlines"],
+        watchlist_flags=flags,
+    )
+
+
+def screen_tickers(tickers: Iterable[str], period: str = "5y", threshold: float = 0.55) -> pd.DataFrame:
+    rows = []
+    for ticker in tickers:
+        t = ticker.strip().upper()
+        if not t:
+            continue
+        try:
+            result = train_predict_for_ticker(t, period=period, threshold=threshold)
+            rows.append({
+                "Ticker": result.ticker,
+                "Signal": result.model_signal,
+                "Mood": result.mood,
+                "News Sentiment": result.sentiment_label,
+                "Earnings": result.earnings_flag,
+                "Latest Date": result.latest_date,
+                "Latest Close": result.latest_close,
+                "Up Probability": result.next_day_up_probability,
+                "Holdout Accuracy": result.holdout_accuracy,
+                "RSI": result.rsi_14,
+                "20D Momentum": result.momentum_20d,
+                "Volume Ratio": result.volume_ratio,
+                "Strategy Return": result.strategy_return,
+                "Buy & Hold Return": result.buy_hold_return,
+            })
+        except Exception as exc:
+            rows.append({
+                "Ticker": t,
+                "Signal": "ERROR",
+                "Mood": "",
+                "News Sentiment": "",
+                "Earnings": "",
+                "Latest Date": "",
+                "Latest Close": np.nan,
+                "Up Probability": np.nan,
+                "Holdout Accuracy": np.nan,
+                "RSI": np.nan,
+                "20D Momentum": np.nan,
+                "Volume Ratio": np.nan,
+                "Strategy Return": np.nan,
+                "Buy & Hold Return": np.nan,
+                "Error": str(exc),
+            })
+
+    df = pd.DataFrame(rows)
+    if "Up Probability" in df.columns:
+        df = df.sort_values(by="Up Probability", ascending=False, na_position="last")
+    return df.reset_index(drop=True)
+
+
+def generate_projection_chart_data(
+    result: ModelResult,
+    forecast_days: int = 20,
+    n_sims: int = 200,
+    lookback_days: int = 60,
+    seed: int = 42,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    rng = np.random.default_rng(seed)
+
+    hist = result.history.copy()
+    close = hist["Close"].dropna().copy()
+
+    returns = close.pct_change().dropna()
+    recent_returns = returns.tail(lookback_days)
+    if len(recent_returns) < 20:
+        recent_returns = returns.tail(min(len(returns), 60))
+
+    base_mu = float(recent_returns.mean())
+    sigma = float(recent_returns.std())
+    sigma = max(sigma, 0.0001)
+
+    tilt = (result.next_day_up_probability - 0.5) * sigma * 0.5
+    drift = base_mu + tilt
+
+    last_price = float(close.iloc[-1])
+    future_index = pd.bdate_range(start=close.index[-1] + pd.Timedelta(days=1), periods=forecast_days)
+
+    paths = np.zeros((forecast_days, n_sims))
+    for s in range(n_sims):
+        price = last_price
+        for day in range(forecast_days):
+            shock = rng.normal(drift, sigma)
+            price = max(0.01, price * (1 + shock))
+            paths[day, s] = price
+
+    path_df = pd.DataFrame(paths, index=future_index, columns=[f"path_{i+1}" for i in range(n_sims)])
+
+    summary = pd.DataFrame(index=future_index)
+    summary["Median"] = path_df.median(axis=1)
+    summary["Low Band (10%)"] = path_df.quantile(0.10, axis=1)
+    summary["High Band (90%)"] = path_df.quantile(0.90, axis=1)
+    summary["Bull Case (95%)"] = path_df.quantile(0.95, axis=1)
+    summary["Bear Case (5%)"] = path_df.quantile(0.05, axis=1)
+
+    return summary, path_df
