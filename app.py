@@ -15,6 +15,9 @@ from predictor import generate_projection_chart_data, train_predict_for_ticker
 
 
 APP_URL = "https://stock-predictor-app-chqgww4vn5xvfzytgesxvv.streamlit.app/"
+PAGE_OPTIONS = ["Dashboard", "Details", "Headlines", "Share"]
+
+st.set_page_config(page_title="Stock Predictor", layout="wide", initial_sidebar_state="expanded")
 
 query_params = st.query_params
 query_ticker = str(query_params.get("ticker", "AAPL")).strip().upper() if query_params.get("ticker", None) else "AAPL"
@@ -23,8 +26,24 @@ if "active_ticker" not in st.session_state:
     st.session_state.active_ticker = query_ticker
 if query_ticker and query_ticker != st.session_state.active_ticker:
     st.session_state.active_ticker = query_ticker
-if "auto_run" not in st.session_state:
-    st.session_state.auto_run = True
+if "selected_view" not in st.session_state:
+    st.session_state.selected_view = "Dashboard"
+if "last_run_key" not in st.session_state:
+    st.session_state.last_run_key = None
+if "last_result" not in st.session_state:
+    st.session_state.last_result = None
+if "last_summary" not in st.session_state:
+    st.session_state.last_summary = None
+if "last_headlines" not in st.session_state:
+    st.session_state.last_headlines = []
+if "form_period" not in st.session_state:
+    st.session_state.form_period = "5y"
+if "form_threshold" not in st.session_state:
+    st.session_state.form_threshold = 0.55
+if "form_forecast_days" not in st.session_state:
+    st.session_state.form_forecast_days = 20
+if "form_n_sims" not in st.session_state:
+    st.session_state.form_n_sims = 200
 
 
 def safe_attr(obj, name, default):
@@ -75,9 +94,7 @@ def fetch_sp500_symbols() -> list[str]:
             df = pd.read_csv(url)
             for col in ["Symbol", "symbol"]:
                 if col in df.columns:
-                    symbols = (
-                        df[col].astype(str).str.replace(".", "-", regex=False).dropna().unique().tolist()
-                    )
+                    symbols = df[col].astype(str).str.replace(".", "-", regex=False).dropna().unique().tolist()
                     if symbols:
                         return symbols
         except Exception:
@@ -95,7 +112,7 @@ def fetch_sp500_top_movers(limit: int = 8) -> pd.DataFrame:
 
     def chunks(seq, size):
         for i in range(0, len(seq), size):
-            yield seq[i:i+size]
+            yield seq[i:i + size]
 
     for group in chunks(symbols, 100):
         try:
@@ -152,7 +169,19 @@ def fetch_sp500_top_movers(limit: int = 8) -> pd.DataFrame:
     return movers.reset_index(drop=True)
 
 
-st.set_page_config(page_title="Stock Predictor", layout="wide", initial_sidebar_state="expanded")
+@st.cache_data(ttl=1800, show_spinner=False)
+def run_dashboard_data(
+    ticker: str,
+    period: str,
+    threshold: float,
+    forecast_days: int,
+    n_sims: int,
+) -> tuple[object, pd.DataFrame, list[dict]]:
+    result = train_predict_for_ticker(ticker, period=period, threshold=threshold)
+    summary, _ = generate_projection_chart_data(result, forecast_days=forecast_days, n_sims=n_sims)
+    headlines = fetch_live_headlines(ticker, limit=8)
+    return result, summary, headlines
+
 
 st.markdown("""
 <style>
@@ -160,82 +189,78 @@ st.markdown("""
         background: linear-gradient(180deg, #0b1220 0%, #101828 100%);
         color: #f8fafc;
     }
-
     .main .block-container {
-        padding-top: 0.7rem;
-        padding-bottom: 1.25rem;
-        max-width: 1080px;
+        padding-top: 0.55rem;
+        padding-bottom: 1.8rem;
+        max-width: 1020px;
     }
-
     @media (max-width: 768px) {
         .main .block-container {
-            padding-left: 0.55rem;
-            padding-right: 0.55rem;
-            padding-top: 0.45rem;
-            padding-bottom: 1rem;
+            padding-left: 0.5rem;
+            padding-right: 0.5rem;
+            padding-top: 0.35rem;
+            padding-bottom: 1.25rem;
         }
-        h1 { font-size: 1.45rem !important; }
-        h2 { font-size: 1.08rem !important; }
-        h3 { font-size: 0.98rem !important; }
+        h1 { font-size: 1.35rem !important; }
+        h2 { font-size: 1.04rem !important; }
+        h3 { font-size: 0.95rem !important; }
     }
 
     h1, h2, h3 {
         color: #f8fafc !important;
         letter-spacing: -0.02em;
-        margin-bottom: 0.35rem !important;
+        margin-bottom: 0.25rem !important;
     }
 
     .hero, .section-card, .movers-card {
-        padding: 0.75rem 0.8rem;
+        padding: 0.72rem 0.76rem;
         border: 1px solid #223046;
         border-radius: 14px;
         background: #111827;
         box-shadow: 0 4px 16px rgba(0,0,0,0.16);
-        margin-bottom: 0.65rem;
+        margin-bottom: 0.6rem;
     }
 
     .muted, .small-note {
         color: #a5b4c7;
-        font-size: .86rem;
-        margin-top: .2rem;
+        font-size: .84rem;
+        margin-top: .18rem;
     }
 
     .flag {
-        padding: .34rem .55rem;
+        padding: .32rem .52rem;
         border-radius: 999px;
         display: inline-block;
-        margin: .14rem .16rem .14rem 0;
+        margin: .12rem .14rem .12rem 0;
         background: #1b2638;
         border: 1px solid #314158;
         color: #e5edf8;
-        font-size: .78rem;
+        font-size: .76rem;
     }
 
     .headline-card {
-        padding: .7rem .78rem;
+        padding: .68rem .72rem;
         border: 1px solid #223046;
         border-radius: 12px;
         background: #0f172a;
-        margin-bottom: .48rem;
+        margin-bottom: .45rem;
     }
-
     .headline-source {
         color: #93c5fd;
-        font-size: .78rem;
+        font-size: .76rem;
         font-weight: 600;
     }
 
     .signal-buy, .signal-sell, .signal-watch {
-        padding: .62rem .8rem;
+        padding: .58rem .74rem;
         border-radius: 12px;
         font-weight: 800;
         text-align: center;
         border: 1px solid transparent;
-        margin-bottom: .55rem;
+        margin-bottom: .5rem;
         letter-spacing: .02em;
-        font-size: .95rem;
+        font-size: .92rem;
     }
-
     .signal-buy { background: #0b3b2e; color: #6ee7b7; border-color: #14532d; }
     .signal-sell { background: #4c1717; color: #fca5a5; border-color: #7f1d1d; }
     .signal-watch { background: #5a3b10; color: #fcd34d; border-color: #92400e; }
@@ -244,89 +269,61 @@ st.markdown("""
         margin: 0;
         padding-left: 1rem;
         color: #dbe4f0;
-        line-height: 1.48;
-        font-size: .92rem;
+        line-height: 1.45;
+        font-size: .9rem;
     }
-
     .detail-label {
         color: #93c5fd;
         font-weight: 700;
-        margin-bottom: .3rem;
+        margin-bottom: .26rem;
         display: block;
-        font-size: .84rem;
-    }
-
-    .mover-link {
-        display: inline-block;
-        padding: .48rem .68rem;
-        border-radius: 12px;
-        margin: .12rem .14rem .12rem 0;
         font-size: .82rem;
-        font-weight: 800;
-        text-decoration: none !important;
-        border: 1px solid transparent;
-        transition: transform .08s ease;
     }
-    .mover-link:hover { transform: translateY(-1px); }
-    .mover-up { background: #111827; color: #22c55e !important; border-color: #14532d; }
-    .mover-up:hover { background: #13261d; color: #86efac !important; }
-    .mover-down { background: #111827; color: #ef4444 !important; border-color: #7f1d1d; }
-    .mover-down:hover { background: #291212; color: #fca5a5 !important; }
 
     .indicator-card {
-        padding: .55rem .6rem;
+        padding: .48rem .52rem;
         border: 1px solid #223046;
         border-radius: 12px;
         background: #0f172a;
-        margin-bottom: .5rem;
+        margin-bottom: .45rem;
     }
-
     .indicator-title {
         color: #93c5fd;
-        font-size: .78rem;
+        font-size: .76rem;
         font-weight: 700;
-        margin-bottom: .05rem;
+        margin-bottom: 0;
         text-align: center;
     }
-
     .indicator-wrap {
         position: relative;
         width: 100%;
-        max-width: 220px;
-        height: 124px;
+        max-width: 210px;
+        height: 114px;
         margin: 0 auto;
     }
-
     .indicator-arch-base,
     .indicator-arch-fill {
         position: absolute;
         left: 50%;
         top: 8px;
         transform: translateX(-50%);
-        width: 152px;
-        height: 76px;
-        border-top-left-radius: 152px;
-        border-top-right-radius: 152px;
+        width: 148px;
+        height: 74px;
+        border-top-left-radius: 148px;
+        border-top-right-radius: 148px;
         border-bottom: 0;
         box-sizing: border-box;
         overflow: hidden;
     }
-
-    .indicator-arch-base {
-        border: 10px solid #223046;
-    }
-
-    .indicator-arch-fill {
-        border: 10px solid transparent;
-    }
-
+    .indicator-arch-base { border: 10px solid #223046; }
+    .indicator-arch-fill { border: 10px solid transparent; }
     .indicator-value {
         position: absolute;
         left: 50%;
-        bottom: 18px;
+        bottom: 8px;
         transform: translateX(-50%);
         color: #f8fafc;
-        font-size: 1.08rem;
+        font-size: 1rem;
         font-weight: 800;
         line-height: 1;
         text-align: center;
@@ -335,40 +332,33 @@ st.markdown("""
 
     .details-grid {
         display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 0.65rem;
+        grid-template-columns: 1fr;
+        gap: 0.6rem;
     }
-
+    @media (min-width: 900px) {
+        .details-grid { grid-template-columns: 1fr 1fr; }
+    }
     @media (max-width: 768px) {
-        .details-grid { grid-template-columns: 1fr; }
-        .hero, .section-card, .movers-card { padding: 0.7rem 0.72rem; }
-        .indicator-wrap { max-width: 210px; height: 118px; }
-        .indicator-value { font-size: 1rem; }
-        .mover-link {
-            width: calc(50% - 0.25rem);
-            text-align: center;
-            margin-right: .08rem;
-            margin-bottom: .22rem;
-            box-sizing: border-box;
-        }
+        .hero, .section-card, .movers-card { padding: 0.66rem 0.68rem; }
+        .indicator-card { padding: 0.4rem; }
+        .indicator-wrap { max-width: 160px; height: 95px; }
+        .indicator-value { font-size: .9rem; }
     }
 
     [data-testid="stMetric"] {
         background: #111827;
         border: 1px solid #223046;
         border-radius: 12px;
-        padding: .42rem .5rem;
+        padding: .4rem .46rem;
     }
-
     [data-testid="stMetricLabel"] {
         color: #b8c4d6 !important;
         font-weight: 600;
-        font-size: .8rem !important;
+        font-size: .76rem !important;
     }
-
     [data-testid="stMetricValue"] {
         color: #f8fafc !important;
-        font-size: 1rem !important;
+        font-size: .96rem !important;
     }
 
     div[data-testid="stDataFrame"] {
@@ -379,34 +369,33 @@ st.markdown("""
     }
 
     .stTabs [data-baseweb="tab-list"] {
-        gap: .22rem;
+        gap: .25rem;
         flex-wrap: wrap;
     }
-
     .stTabs [data-baseweb="tab"] {
         background: #162032;
-        border-radius: 10px 10px 0 0;
+        border-radius: 12px 12px 0 0;
         color: #d9e3f0;
-        padding: .35rem .58rem;
+        padding: .38rem .65rem;
         font-size: .82rem;
+        border: 1px solid #223046;
     }
-
     .stTabs [aria-selected="true"] {
         background: #24324a !important;
+        color: #ffffff !important;
     }
 
     section[data-testid="stSidebar"] {
         background: #0f172a;
         border-right: 1px solid #1f2a3d;
     }
-
     section[data-testid="stSidebar"]::before {
         content: "Search tickers";
         display: block;
         color: #f8fafc;
-        font-size: .98rem;
+        font-size: .96rem;
         font-weight: 800;
-        padding: .8rem .9rem 0.15rem .9rem;
+        padding: .72rem .86rem 0.12rem .86rem;
     }
 
     .stButton > button, .stLinkButton > a {
@@ -417,17 +406,20 @@ st.markdown("""
         font-weight: 700 !important;
         width: 100%;
         text-align: center;
-        min-height: 2.5rem;
+        min-height: 2.38rem;
     }
+    .stButton > button:hover, .stLinkButton > a:hover { background: #1d4ed8 !important; }
 
-    .stButton > button:hover, .stLinkButton > a:hover {
-        background: #1d4ed8 !important;
+    .mover-button-wrap button {
+        min-height: 2rem !important;
+        font-size: .78rem !important;
+        border-radius: 12px !important;
     }
 
     .stSelectbox label, .stTextInput label, .stSlider label {
         color: #dbe4f0 !important;
         font-weight: 600;
-        font-size: .86rem !important;
+        font-size: .84rem !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -446,9 +438,16 @@ def build_candlestick_chart(hist: pd.DataFrame, result) -> go.Figure:
 
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
-        x=chart_data.index, open=chart_data["Open"], high=chart_data["High"], low=chart_data["Low"], close=chart_data["Close"],
-        name="Price", increasing_line_color="#34d399", decreasing_line_color="#f87171",
-        increasing_fillcolor="#34d399", decreasing_fillcolor="#f87171",
+        x=chart_data.index,
+        open=chart_data["Open"],
+        high=chart_data["High"],
+        low=chart_data["Low"],
+        close=chart_data["Close"],
+        name="Price",
+        increasing_line_color="#34d399",
+        decreasing_line_color="#f87171",
+        increasing_fillcolor="#34d399",
+        decreasing_fillcolor="#f87171",
     ))
     fig.add_trace(go.Scatter(
         x=chart_data.index, y=chart_data["SMA20"], mode="lines", name="20D Avg",
@@ -460,7 +459,6 @@ def build_candlestick_chart(hist: pd.DataFrame, result) -> go.Figure:
         (resistance, "Resistance", "#a78bfa"),
     ]:
         fig.add_hline(y=y, line_dash="dot", line_color=color, line_width=1.0, annotation_text=label, annotation_position="right", annotation_font_color=color)
-
     fig.update_layout(
         title=f"{safe_attr(result, 'ticker', 'Ticker')} Price",
         height=360,
@@ -547,11 +545,16 @@ def build_simple_gauge_html(title: str, value: float, min_value: float, max_valu
     """
 
 
+def set_active_ticker(ticker: str) -> None:
+    st.session_state.active_ticker = ticker.upper()
+    query_params["ticker"] = st.session_state.active_ticker
+
+
 header_left, header_right = st.columns([3, 1])
 with header_left:
     st.markdown('<div class="hero">', unsafe_allow_html=True)
     st.title("Stock Predictor")
-    st.caption("Cleaner mobile-first stock dashboard.")
+    st.caption("Smoothed Streamlit build with cached model runs and lighter navigation.")
     st.markdown('</div>', unsafe_allow_html=True)
 with header_right:
     st.link_button("📲 Share App", APP_URL, use_container_width=True)
@@ -560,94 +563,95 @@ movers = fetch_sp500_top_movers(limit=8)
 st.markdown('<div class="movers-card">', unsafe_allow_html=True)
 st.subheader("Live S&P 500 movers")
 if not movers.empty:
-    mover_html = ""
-    for _, row in movers.iterrows():
-        ticker = row["Ticker"]
+    mover_cols = st.columns(4)
+    for idx, (_, row) in enumerate(movers.iterrows()):
+        ticker = str(row["Ticker"])
         pct = float(row["Change %"])
         label = f"{ticker} {'▲' if pct >= 0 else '▼'} {pct:+.2f}%"
-        css_class = "mover-up" if pct >= 0 else "mover-down"
-        mover_html += f'<a class="mover-link {css_class}" href="?ticker={ticker}" target="_self">{label}</a>'
-    st.markdown(mover_html, unsafe_allow_html=True)
-    st.caption("Tap a mover to switch the dashboard in this same tab.")
+        with mover_cols[idx % 4]:
+            if st.button(label, key=f"mover_{ticker}", use_container_width=True):
+                set_active_ticker(ticker)
 else:
     st.caption("Top movers were not available right now.")
 st.markdown('</div>', unsafe_allow_html=True)
 
-dashboard_tab, share_tab = st.tabs(["Dashboard", "Share"])
-
-with share_tab:
-    st.subheader("Share with friends")
-    st.write("Send this link or scan the QR code.")
-    st.code(APP_URL, language=None)
-    share_cols = st.columns(2)
-    with share_cols[0]:
-        st.link_button("Open app link", APP_URL, use_container_width=True)
-    with share_cols[1]:
-        st.download_button(
-            "Download QR",
-            data=build_qr_code(APP_URL),
-            file_name="stock_predictor_qr.png",
-            mime="image/png",
-            use_container_width=True,
-        )
-    st.image(build_qr_code(APP_URL), caption="Scan to open on your phone", width=190)
-
-with dashboard_tab:
-    with st.sidebar:
-        st.markdown("<div class='muted'>Search one ticker at a time.</div>", unsafe_allow_html=True)
+with st.sidebar:
+    st.markdown("<div class='muted'>Adjust settings, then run once. Slider changes will not retrigger heavy work until you submit.</div>", unsafe_allow_html=True)
+    with st.form("dashboard_controls"):
         search_ticker = st.text_input("Search ticker", value=st.session_state.active_ticker).strip().upper()
-        period = st.selectbox("History period", options=["1y", "2y", "5y", "10y"], index=2)
-        threshold = st.slider("Signal threshold", min_value=0.50, max_value=0.75, value=0.55, step=0.01)
-        forecast_days = st.slider("Projection days", min_value=5, max_value=60, value=20, step=5)
-        n_sims = st.slider("Projection paths", min_value=50, max_value=500, value=200, step=50)
-        run = st.button("Run dashboard", use_container_width=True)
+        period = st.selectbox("History period", options=["1y", "2y", "5y", "10y"], index=["1y", "2y", "5y", "10y"].index(st.session_state.form_period))
+        threshold = st.slider("Signal threshold", min_value=0.50, max_value=0.75, value=float(st.session_state.form_threshold), step=0.01)
+        forecast_days = st.slider("Projection days", min_value=5, max_value=60, value=int(st.session_state.form_forecast_days), step=5)
+        n_sims = st.slider("Projection paths", min_value=50, max_value=500, value=int(st.session_state.form_n_sims), step=50)
+        run = st.form_submit_button("Run dashboard", use_container_width=True)
 
-    should_run = run or st.session_state.auto_run
+focus = (search_ticker or st.session_state.active_ticker or "AAPL").upper()
+st.session_state.form_period = period
+st.session_state.form_threshold = threshold
+st.session_state.form_forecast_days = forecast_days
+st.session_state.form_n_sims = n_sims
 
-    if should_run:
-        focus = search_ticker or st.session_state.active_ticker or "AAPL"
-        st.session_state.active_ticker = focus
-        st.query_params["ticker"] = focus
-        st.session_state.auto_run = False
+run_key = (focus, period, float(threshold), int(forecast_days), int(n_sims))
+should_run = run or st.session_state.last_result is None or focus != st.session_state.active_ticker
 
-        result = train_predict_for_ticker(focus, period=period, threshold=threshold)
-        summary, _ = generate_projection_chart_data(result, forecast_days=forecast_days, n_sims=n_sims)
-        live_headlines = fetch_live_headlines(focus, limit=8)
+result = st.session_state.last_result
+summary = st.session_state.last_summary
+live_headlines = st.session_state.last_headlines
 
-        st.markdown(f'<div class="{signal_class(safe_attr(result, "model_signal", "WATCH"))}">{safe_attr(result, "model_signal", "WATCH")}</div>', unsafe_allow_html=True)
+if should_run:
+    set_active_ticker(focus)
+    with st.spinner(f"Running {focus} dashboard..."):
+        result, summary, live_headlines = run_dashboard_data(
+            st.session_state.active_ticker,
+            period,
+            float(threshold),
+            int(forecast_days),
+            int(n_sims),
+        )
+    st.session_state.last_run_key = run_key
+    st.session_state.last_result = result
+    st.session_state.last_summary = summary
+    st.session_state.last_headlines = live_headlines
+elif st.session_state.last_run_key != run_key and st.session_state.last_result is not None:
+    st.caption("Settings changed. Press Run dashboard to refresh the model.")
 
-        metric_cols_1 = st.columns(2)
-        metric_cols_1[0].metric("Price", f"${safe_attr(result, 'latest_close', 0.0):,.2f}")
-        metric_cols_1[1].metric("Mood", safe_attr(result, "mood", "Neutral"))
+if result is not None:
+    st.markdown(f'<div class="{signal_class(safe_attr(result, "model_signal", "WATCH"))}">{safe_attr(result, "model_signal", "WATCH")}</div>', unsafe_allow_html=True)
 
-        metric_cols_2 = st.columns(2)
-        metric_cols_2[0].metric("Up probability", f"{safe_attr(result, 'next_day_up_probability', 0.5):.2%}")
-        metric_cols_2[1].metric("Accuracy", f"{safe_attr(result, 'holdout_accuracy', 0.0):.2%}")
+    metric_cols = st.columns(2)
+    metric_cols[0].metric("Price", f"${safe_attr(result, 'latest_close', 0.0):,.2f}")
+    metric_cols[1].metric("Mood", safe_attr(result, "mood", "Neutral"))
 
-        metric_cols_3 = st.columns(2)
-        metric_cols_3[0].metric("Momentum", f"{safe_attr(result, 'momentum_20d', 0.0):.2%}")
-        metric_cols_3[1].metric("Volume", f"{safe_attr(result, 'volume_ratio', 1.0):.2f}x")
+    metric_cols = st.columns(2)
+    metric_cols[0].metric("Up probability", f"{safe_attr(result, 'next_day_up_probability', 0.5):.2%}")
+    metric_cols[1].metric("Accuracy", f"{safe_attr(result, 'holdout_accuracy', 0.0):.2%}")
 
-        metric_cols_4 = st.columns(2)
-        metric_cols_4[0].metric("News tone", safe_attr(result, "sentiment_label", "Neutral"))
-        metric_cols_4[1].metric("Earnings", safe_attr(result, "earnings_flag", "No date found"))
+    metric_cols = st.columns(2)
+    metric_cols[0].metric("Momentum", f"{safe_attr(result, 'momentum_20d', 0.0):.2%}")
+    metric_cols[1].metric("Volume", f"{safe_attr(result, 'volume_ratio', 1.0):.2f}x")
 
-        page_tabs = st.tabs(["Charts", "Details", "Headlines", "Share this ticker"])
+    metric_cols = st.columns(2)
+    metric_cols[0].metric("News tone", safe_attr(result, "sentiment_label", "Neutral"))
+    metric_cols[1].metric("Earnings", safe_attr(result, "earnings_flag", "No date found"))
 
-        with page_tabs[0]:
-            st.plotly_chart(build_candlestick_chart(result.history, result), use_container_width=True)
-            st.plotly_chart(build_projection_chart(summary, safe_attr(result, "latest_close", 0.0)), use_container_width=True)
+    tab_dashboard, tab_details, tab_headlines, tab_share = st.tabs(PAGE_OPTIONS)
 
-        with page_tabs[1]:
-            st.markdown('<div class="details-grid">', unsafe_allow_html=True)
+    with tab_dashboard:
+        st.plotly_chart(build_candlestick_chart(result.history, result), use_container_width=True)
+        st.plotly_chart(build_projection_chart(summary, safe_attr(result, "latest_close", 0.0)), use_container_width=True)
 
-            st.markdown('<div>', unsafe_allow_html=True)
+    with tab_details:
+        left, right = st.columns(2)
+        with left:
             st.markdown('<div class="section-card">', unsafe_allow_html=True)
             st.subheader("Indicators")
             rsi_value = max(0, min(100, safe_attr(result, "rsi_14", 50.0)))
             sentiment_value = max(-1, min(1, safe_attr(result, "sentiment_score", 0.0)))
-            st.markdown(build_simple_gauge_html("RSI", rsi_value, 0, 100, "pct0"), unsafe_allow_html=True)
-            st.markdown(build_simple_gauge_html("News Sentiment", sentiment_value, -1, 1, "float2"), unsafe_allow_html=True)
+            g1, g2 = st.columns(2)
+            with g1:
+                st.markdown(build_simple_gauge_html("RSI", rsi_value, 0, 100, "pct0"), unsafe_allow_html=True)
+            with g2:
+                st.markdown(build_simple_gauge_html("News Sentiment", sentiment_value, -1, 1, "float2"), unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
             st.markdown('<div class="section-card">', unsafe_allow_html=True)
@@ -669,9 +673,8 @@ with dashboard_tab:
             flags_html = "".join([f'<span class="flag">{flag}</span>' for flag in flags])
             st.markdown(flags_html, unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
-            st.markdown('</div>', unsafe_allow_html=True)
 
-            st.markdown('<div>', unsafe_allow_html=True)
+        with right:
             st.markdown('<div class="section-card">', unsafe_allow_html=True)
             st.subheader("Model summary")
             rsi = safe_attr(result, "rsi_14", 50.0)
@@ -694,40 +697,38 @@ with dashboard_tab:
             else:
                 st.write("No feature importance data available.")
             st.markdown('</div>', unsafe_allow_html=True)
-            st.markdown('</div>', unsafe_allow_html=True)
 
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        with page_tabs[2]:
-            if live_headlines:
-                st.caption(f"Latest headlines for {focus}. Refresh or rerun later for newer items.")
-                for item in live_headlines:
-                    source = item.get("source", "")
-                    published = item.get("published", "")
-                    title = item.get("title", "")
-                    link = item.get("link", "")
-                    source_line = f"{source} • {published}" if source and published else source or published
-                    st.markdown(
-                        f"""
-                        <div class="headline-card">
-                            <div class="headline-source">{source_line}</div>
-                            <div style="margin-top:.25rem;">
-                                <a href="{link}" target="_blank" style="color:#f8fafc; text-decoration:none; font-weight:600;">{title}</a>
-                            </div>
+    with tab_headlines:
+        if live_headlines:
+            st.caption(f"Latest headlines for {st.session_state.active_ticker}. Refresh or rerun later for newer items.")
+            for item in live_headlines:
+                source = item.get("source", "")
+                published = item.get("published", "")
+                title = item.get("title", "")
+                link = item.get("link", "")
+                source_line = f"{source} • {published}" if source and published else source or published
+                st.markdown(
+                    f"""
+                    <div class="headline-card">
+                        <div class="headline-source">{source_line}</div>
+                        <div style="margin-top:.22rem;">
+                            <a href="{link}" target="_blank" style="color:#f8fafc; text-decoration:none; font-weight:600;">{title}</a>
                         </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-            else:
-                st.write("No live headlines were returned right now. Try rerunning in a few minutes.")
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.write("No live headlines were returned right now. Try rerunning in a few minutes.")
 
-        with page_tabs[3]:
-            ticker_url = f"{APP_URL}?ticker={focus}"
-            st.write(f"Share a direct link to the {focus} dashboard.")
-            st.code(ticker_url, language=None)
-            st.link_button("Open direct ticker link", ticker_url, use_container_width=True)
-            st.image(build_qr_code(ticker_url), caption="Scan to open this ticker on your phone", width=160)
-
-        st.caption("Full mobile cleanup pass applied across the app.")
-    else:
-        st.info("Search one ticker on the left or tap a mover above.")
+    with tab_share:
+        ticker_url = f"{APP_URL}?ticker={st.session_state.active_ticker}"
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.subheader("Share this ticker")
+        st.write(f"Share a direct link to the {st.session_state.active_ticker} dashboard.")
+        st.code(ticker_url, language=None)
+        st.link_button("Open direct ticker link", ticker_url, use_container_width=True)
+        st.image(build_qr_code(ticker_url), caption="Scan to open this ticker on your phone", width=160)
+        st.markdown('</div>', unsafe_allow_html=True)
+else:
+    st.info("Search one ticker on the left or tap a mover above.")
