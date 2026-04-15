@@ -1,3 +1,5 @@
-Stock Predictor Streamlit rebuild v16a
+Stock Predictor Streamlit rebuild with Stooq fallback.
 
-Upload these files to the repo root and redeploy.
+Main file: app.py
+
+If Yahoo Finance is slow or rate-limited on Streamlit Cloud, the app falls back to Stooq for daily OHLCV history.

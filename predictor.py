@@ -2,34 +2,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from io import StringIO
 from typing import Iterable
 
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 
-
 FEATURE_COLUMNS = [
-    "return_1d",
-    "return_5d",
-    "return_10d",
-    "sma_5",
-    "sma_10",
-    "sma_20",
-    "ema_12",
-    "ema_26",
-    "volatility_10",
-    "volatility_20",
-    "rsi_14",
-    "macd",
-    "signal",
-    "price_vs_sma_20",
-    "volume_change",
-    "hl_range",
-    "oc_change",
-    "Volume",
+    "return_1d", "return_5d", "return_10d", "sma_5", "sma_10", "sma_20",
+    "ema_12", "ema_26", "volatility_10", "volatility_20", "rsi_14", "macd",
+    "signal", "price_vs_sma_20", "volume_change", "hl_range", "oc_change", "Volume",
 ]
 
 POSITIVE_WORDS = {
@@ -63,7 +49,6 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     out = normalize_columns(df)
-
     required = {"Open", "High", "Low", "Close", "Volume"}
     missing = required - set(out.columns)
     if missing:
@@ -72,84 +57,94 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     out["return_1d"] = out["Close"].pct_change()
     out["return_5d"] = out["Close"].pct_change(5)
     out["return_10d"] = out["Close"].pct_change(10)
-
     out["sma_5"] = out["Close"].rolling(5).mean()
     out["sma_10"] = out["Close"].rolling(10).mean()
     out["sma_20"] = out["Close"].rolling(20).mean()
     out["sma_50"] = out["Close"].rolling(50).mean()
     out["ema_12"] = out["Close"].ewm(span=12, adjust=False).mean()
     out["ema_26"] = out["Close"].ewm(span=26, adjust=False).mean()
-
     out["volatility_10"] = out["return_1d"].rolling(10).std()
     out["volatility_20"] = out["return_1d"].rolling(20).std()
-
     out["rsi_14"] = compute_rsi(out["Close"], 14)
     out["macd"] = out["ema_12"] - out["ema_26"]
     out["signal"] = out["macd"].ewm(span=9, adjust=False).mean()
-
     out["price_vs_sma_20"] = out["Close"] / out["sma_20"]
     out["volume_change"] = out["Volume"].pct_change()
     out["hl_range"] = (out["High"] - out["Low"]) / out["Close"]
     out["oc_change"] = (out["Close"] - out["Open"]) / out["Open"]
-
     out["target"] = (out["Close"].shift(-1) > out["Close"]).astype(int)
-
     numeric_cols = out.select_dtypes(include=["number"]).columns
     out[numeric_cols] = out[numeric_cols].replace([np.inf, -np.inf], np.nan)
-
-    out = out.dropna().copy()
-    return out
+    return out.dropna().copy()
 
 
-def download_history(ticker: str, period: str = "5y") -> pd.DataFrame:
+def _stooq_symbol(ticker: str) -> str:
     t = ticker.upper().strip()
-    attempts = [
-        {"period": period, "timeout": 30},
-        {"period": period, "timeout": 45},
-        {"period": "2y", "timeout": 30},
-        {"period": "1y", "timeout": 30},
-        {"period": "6mo", "timeout": 20},
-    ]
+    if t.startswith("^"):
+        return t
+    return f"{t}.US"
 
-    last_error = None
-    for attempt in attempts:
+
+def _fetch_stooq_history(ticker: str) -> pd.DataFrame:
+    symbol = _stooq_symbol(ticker).lower()
+    url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    resp = requests.get(url, timeout=20, headers=headers)
+    resp.raise_for_status()
+    text = resp.text.strip()
+    if not text or text.startswith("No data"):
+        raise ValueError(f"No Stooq data for {ticker}")
+    df = pd.read_csv(StringIO(text))
+    if df.empty or "Date" not in df.columns:
+        raise ValueError(f"Invalid Stooq response for {ticker}")
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
+    rename = {c: c.capitalize() for c in df.columns}
+    df = df.rename(columns=rename)
+    needed = ["Open", "High", "Low", "Close", "Volume"]
+    df = df[[c for c in needed if c in df.columns]].copy()
+    for c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna()
+    if df.empty:
+        raise ValueError(f"Empty parsed Stooq data for {ticker}")
+    return df
+
+
+def download_history(ticker: str, period: str = "2y") -> tuple[pd.DataFrame, str]:
+    t = ticker.upper().strip()
+    periods = [period, "1y", "6mo", "3mo"]
+    for p in periods:
         try:
             data = yf.download(
                 t,
-                period=attempt["period"],
+                period=p,
                 auto_adjust=True,
                 progress=False,
                 threads=False,
-                timeout=attempt["timeout"],
-                repair=True,
+                timeout=20,
             )
             data = normalize_columns(data)
             if data is not None and not data.empty:
-                return data
-        except Exception as exc:
-            last_error = exc
-
-    if last_error is not None:
+                return data, "Yahoo Finance"
+        except Exception:
+            pass
+    try:
+        data = _fetch_stooq_history(t)
+        return data, "Stooq"
+    except Exception as exc:
         raise ValueError(
-            f"Market data request timed out or failed for {t}. "
-            f"Yahoo Finance did not return usable data after multiple retries."
-        ) from last_error
-
-    raise ValueError(
-        f"No market data returned for {t}. Try again in a minute or use a shorter history period."
-    )
+            f"No market data returned for {t} from Yahoo Finance or Stooq. {exc}"
+        )
 
 
 def train_test_split_time(data: pd.DataFrame, train_size: float = 0.8):
     x = data[FEATURE_COLUMNS].copy()
     y = data["target"].copy()
-
     x = x.replace([np.inf, -np.inf], np.nan)
     valid_mask = x.notna().all(axis=1) & y.notna()
-
     x = x.loc[valid_mask]
     y = y.loc[valid_mask]
-
     split_idx = int(len(x) * train_size)
     return x.iloc[:split_idx], x.iloc[split_idx:], y.iloc[:split_idx], y.iloc[split_idx:]
 
@@ -167,14 +162,12 @@ def generate_trade_levels(history: pd.DataFrame, latest_close: float) -> dict:
     support = float(recent["Low"].min())
     resistance = float(recent["High"].max())
     atr_proxy = float((recent["High"] - recent["Low"]).rolling(14).mean().dropna().iloc[-1]) if len(recent) >= 14 else float((recent["High"] - recent["Low"]).mean())
-
     stop_loss = max(0.01, latest_close - atr_proxy * 1.25)
     target_1 = latest_close + atr_proxy * 1.0
     target_2 = latest_close + atr_proxy * 2.0
     risk = max(0.01, latest_close - stop_loss)
     reward_1 = max(0.0, target_1 - latest_close)
     reward_2 = max(0.0, target_2 - latest_close)
-
     return {
         "support_level": support,
         "resistance_level": resistance,
@@ -216,15 +209,10 @@ def _safe_to_datetime(value):
 
 
 def get_earnings_info(ticker: str) -> dict:
-    out = {
-        "earnings_date": None,
-        "days_to_earnings": None,
-        "earnings_flag": "No date found",
-    }
+    out = {"earnings_date": None, "days_to_earnings": None, "earnings_flag": "No date found"}
     try:
         tk = yf.Ticker(ticker)
         possible = []
-
         cal = tk.calendar
         if isinstance(cal, pd.DataFrame) and not cal.empty:
             for value in cal.values.flatten():
@@ -232,13 +220,11 @@ def get_earnings_info(ticker: str) -> dict:
         elif isinstance(cal, dict):
             for value in cal.values():
                 possible.append(value)
-
         parsed = None
         for value in possible:
             parsed = _safe_to_datetime(value)
             if parsed is not None:
                 break
-
         if parsed is not None:
             now = pd.Timestamp.now(tz="UTC")
             delta = (parsed.normalize() - now.normalize()).days
@@ -254,22 +240,15 @@ def get_earnings_info(ticker: str) -> dict:
                 out["earnings_flag"] = "Earnings later"
     except Exception:
         pass
-
     return out
 
 
 def get_news_sentiment(ticker: str, max_items: int = 8) -> dict:
-    result = {
-        "sentiment_score": 0.0,
-        "sentiment_label": "Neutral",
-        "headline_count": 0,
-        "headlines": [],
-    }
+    result = {"sentiment_score": 0.0, "sentiment_label": "Neutral", "headline_count": 0, "headlines": []}
     try:
         tk = yf.Ticker(ticker)
         news_items = getattr(tk, "news", []) or []
         selected = news_items[:max_items]
-
         score = 0
         headlines = []
         for item in selected:
@@ -281,39 +260,21 @@ def get_news_sentiment(ticker: str, max_items: int = 8) -> dict:
             neg_hits = sum(1 for w in NEGATIVE_WORDS if w in lower)
             score += (pos_hits - neg_hits)
             headlines.append(title)
-
         count = len(headlines)
         avg = float(score / count) if count else 0.0
-
         label = "Neutral"
         if avg >= 0.35:
             label = "Positive"
         elif avg <= -0.35:
             label = "Negative"
-
-        result.update({
-            "sentiment_score": avg,
-            "sentiment_label": label,
-            "headline_count": count,
-            "headlines": headlines,
-        })
+        result.update({"sentiment_score": avg, "sentiment_label": label, "headline_count": count, "headlines": headlines})
     except Exception:
         pass
-
     return result
 
 
-def build_watchlist_flags(
-    signal: str,
-    mood: str,
-    volume_ratio: float,
-    earnings_days: int | None,
-    sentiment_label: str,
-    range_position: float,
-    rsi: float,
-) -> list[str]:
+def build_watchlist_flags(signal: str, mood: str, volume_ratio: float, earnings_days: int | None, sentiment_label: str, range_position: float, rsi: float) -> list[str]:
     flags = []
-
     if signal == "BUY" and mood == "Bullish":
         flags.append("Trend setup aligned")
     if volume_ratio >= 1.5:
@@ -332,7 +293,6 @@ def build_watchlist_flags(
         flags.append("Momentum overheated")
     if rsi <= 35:
         flags.append("Momentum washed out")
-
     if not flags:
         flags.append("No major alert flags")
     return flags
@@ -377,126 +337,71 @@ class ModelResult:
     headline_count: int
     headlines: list[str]
     watchlist_flags: list[str]
+    data_source: str
 
 
-def train_predict_for_ticker(ticker: str, period: str = "5y", threshold: float = 0.55) -> ModelResult:
-    raw = download_history(ticker, period=period)
+def train_predict_for_ticker(ticker: str, period: str = "2y", threshold: float = 0.55) -> ModelResult:
+    raw, data_source = download_history(ticker, period=period)
     hist = raw.copy()
     data = prepare_features(raw)
-
-    if len(data) < 200:
+    if len(data) < 80:
         raise ValueError(f"Not enough history for {ticker}")
-
     x_train, x_test, y_train, y_test = train_test_split_time(data)
-
-    if len(x_train) < 50 or len(x_test) < 10:
+    if len(x_train) < 40 or len(x_test) < 10:
         raise ValueError(f"Not enough clean training data for {ticker}")
-
     model = RandomForestClassifier(
-        n_estimators=300,
-        max_depth=8,
-        min_samples_split=10,
-        min_samples_leaf=5,
-        random_state=42,
-        class_weight="balanced_subsample",
-        n_jobs=-1,
+        n_estimators=250, max_depth=8, min_samples_split=10, min_samples_leaf=5,
+        random_state=42, class_weight="balanced_subsample", n_jobs=-1,
     )
     model.fit(x_train, y_train)
-
     preds = model.predict(x_test)
     probs = model.predict_proba(x_test)[:, 1]
     acc = accuracy_score(y_test, preds)
-
     latest = data.iloc[[-1]]
     next_up_prob = float(model.predict_proba(latest[FEATURE_COLUMNS])[:, 1][0])
-
     test_slice = data.iloc[len(x_train):].copy()
     test_slice["up_prob"] = probs
     test_slice["signal"] = (test_slice["up_prob"] >= threshold).astype(int)
     test_slice["market_return"] = test_slice["Close"].pct_change().fillna(0.0)
     test_slice["strategy_return"] = test_slice["signal"].shift(1).fillna(0) * test_slice["market_return"]
-
     strategy_total = float((1 + test_slice["strategy_return"]).prod() - 1)
     buy_hold_total = float((1 + test_slice["market_return"]).prod() - 1)
-
-    importances = (
-        pd.Series(model.feature_importances_, index=FEATURE_COLUMNS)
-        .sort_values(ascending=False)
-        .head(8)
-    )
-
+    importances = pd.Series(model.feature_importances_, index=FEATURE_COLUMNS).sort_values(ascending=False).head(8)
     latest_close = float(data["Close"].iloc[-1])
     latest_sma20 = float(data["sma_20"].iloc[-1])
     latest_sma50 = float(data["sma_50"].iloc[-1]) if "sma_50" in data.columns else latest_sma20
     latest_rsi = float(data["rsi_14"].iloc[-1])
     latest_macd = float(data["macd"].iloc[-1])
     latest_macd_signal = float(data["signal"].iloc[-1])
-    volume_ratio = float(hist["Volume"].iloc[-1] / hist["Volume"].tail(20).mean()) if hist["Volume"].tail(20).mean() else np.nan
+    volume_tail = hist["Volume"].tail(20).mean()
+    volume_ratio = float(hist["Volume"].iloc[-1] / volume_tail) if volume_tail else np.nan
     momentum_20d = float(hist["Close"].pct_change(20).iloc[-1])
     volatility_20 = float(data["volatility_20"].iloc[-1])
-
     trailing_252 = hist.tail(min(252, len(hist)))
     range_low = float(trailing_252["Low"].min())
     range_high = float(trailing_252["High"].max())
     range_52w_position = (latest_close - range_low) / max(0.01, (range_high - range_low))
-
     model_signal = derive_signal(next_up_prob, latest_close, latest_sma20, latest_rsi, latest_macd, latest_macd_signal)
     levels = generate_trade_levels(hist, latest_close)
     mood = market_mood(next_up_prob, latest_rsi, latest_close, latest_sma20, latest_sma50)
     earnings = get_earnings_info(ticker)
     news = get_news_sentiment(ticker)
-    flags = build_watchlist_flags(
-        signal=model_signal,
-        mood=mood,
-        volume_ratio=volume_ratio,
-        earnings_days=earnings["days_to_earnings"],
-        sentiment_label=news["sentiment_label"],
-        range_position=float(range_52w_position),
-        rsi=latest_rsi,
-    )
-
+    flags = build_watchlist_flags(model_signal, mood, volume_ratio, earnings["days_to_earnings"], news["sentiment_label"], float(range_52w_position), latest_rsi)
     return ModelResult(
-        ticker=ticker.upper(),
-        rows_used=len(data),
-        holdout_accuracy=float(acc),
-        next_day_up_probability=next_up_prob,
-        latest_close=latest_close,
-        latest_date=str(data.index[-1].date()),
-        top_features=[(k, float(v)) for k, v in importances.items()],
-        strategy_return=strategy_total,
-        buy_hold_return=buy_hold_total,
-        history=hist,
-        features_data=data,
-        model_signal=model_signal,
-        support_level=levels["support_level"],
-        resistance_level=levels["resistance_level"],
-        stop_loss=levels["stop_loss"],
-        target_1=levels["target_1"],
-        target_2=levels["target_2"],
-        rr_1=levels["rr_1"],
-        rr_2=levels["rr_2"],
-        rsi_14=latest_rsi,
-        macd=latest_macd,
-        macd_signal=latest_macd_signal,
-        sma20=latest_sma20,
-        sma50=latest_sma50,
-        volume_ratio=volume_ratio,
-        momentum_20d=momentum_20d,
-        volatility_20=volatility_20,
-        range_52w_position=float(range_52w_position),
-        mood=mood,
-        earnings_date=earnings["earnings_date"],
-        days_to_earnings=earnings["days_to_earnings"],
-        earnings_flag=earnings["earnings_flag"],
-        sentiment_score=news["sentiment_score"],
-        sentiment_label=news["sentiment_label"],
-        headline_count=news["headline_count"],
-        headlines=news["headlines"],
-        watchlist_flags=flags,
+        ticker=ticker.upper(), rows_used=len(data), holdout_accuracy=float(acc), next_day_up_probability=next_up_prob,
+        latest_close=latest_close, latest_date=str(data.index[-1].date()), top_features=[(k, float(v)) for k, v in importances.items()],
+        strategy_return=strategy_total, buy_hold_return=buy_hold_total, history=hist, features_data=data, model_signal=model_signal,
+        support_level=levels["support_level"], resistance_level=levels["resistance_level"], stop_loss=levels["stop_loss"],
+        target_1=levels["target_1"], target_2=levels["target_2"], rr_1=levels["rr_1"], rr_2=levels["rr_2"],
+        rsi_14=latest_rsi, macd=latest_macd, macd_signal=latest_macd_signal, sma20=latest_sma20, sma50=latest_sma50,
+        volume_ratio=volume_ratio, momentum_20d=momentum_20d, volatility_20=volatility_20, range_52w_position=float(range_52w_position),
+        mood=mood, earnings_date=earnings["earnings_date"], days_to_earnings=earnings["days_to_earnings"], earnings_flag=earnings["earnings_flag"],
+        sentiment_score=news["sentiment_score"], sentiment_label=news["sentiment_label"], headline_count=news["headline_count"],
+        headlines=news["headlines"], watchlist_flags=flags, data_source=data_source,
     )
 
 
-def screen_tickers(tickers: Iterable[str], period: str = "5y", threshold: float = 0.55) -> pd.DataFrame:
+def screen_tickers(tickers: Iterable[str], period: str = "2y", threshold: float = 0.55) -> pd.DataFrame:
     rows = []
     for ticker in tickers:
         t = ticker.strip().upper()
@@ -505,73 +410,35 @@ def screen_tickers(tickers: Iterable[str], period: str = "5y", threshold: float 
         try:
             result = train_predict_for_ticker(t, period=period, threshold=threshold)
             rows.append({
-                "Ticker": result.ticker,
-                "Signal": result.model_signal,
-                "Mood": result.mood,
-                "News Sentiment": result.sentiment_label,
-                "Earnings": result.earnings_flag,
-                "Latest Date": result.latest_date,
-                "Latest Close": result.latest_close,
-                "Up Probability": result.next_day_up_probability,
-                "Holdout Accuracy": result.holdout_accuracy,
-                "RSI": result.rsi_14,
-                "20D Momentum": result.momentum_20d,
-                "Volume Ratio": result.volume_ratio,
-                "Strategy Return": result.strategy_return,
-                "Buy & Hold Return": result.buy_hold_return,
+                "Ticker": result.ticker, "Signal": result.model_signal, "Mood": result.mood,
+                "News Sentiment": result.sentiment_label, "Earnings": result.earnings_flag,
+                "Latest Date": result.latest_date, "Latest Close": result.latest_close,
+                "Up Probability": result.next_day_up_probability, "Holdout Accuracy": result.holdout_accuracy,
+                "RSI": result.rsi_14, "20D Momentum": result.momentum_20d, "Volume Ratio": result.volume_ratio,
+                "Strategy Return": result.strategy_return, "Buy & Hold Return": result.buy_hold_return,
+                "Data Source": result.data_source,
             })
         except Exception as exc:
-            rows.append({
-                "Ticker": t,
-                "Signal": "ERROR",
-                "Mood": "",
-                "News Sentiment": "",
-                "Earnings": "",
-                "Latest Date": "",
-                "Latest Close": np.nan,
-                "Up Probability": np.nan,
-                "Holdout Accuracy": np.nan,
-                "RSI": np.nan,
-                "20D Momentum": np.nan,
-                "Volume Ratio": np.nan,
-                "Strategy Return": np.nan,
-                "Buy & Hold Return": np.nan,
-                "Error": str(exc),
-            })
-
+            rows.append({"Ticker": t, "Signal": "ERROR", "Error": str(exc)})
     df = pd.DataFrame(rows)
     if "Up Probability" in df.columns:
         df = df.sort_values(by="Up Probability", ascending=False, na_position="last")
     return df.reset_index(drop=True)
 
 
-def generate_projection_chart_data(
-    result: ModelResult,
-    forecast_days: int = 20,
-    n_sims: int = 200,
-    lookback_days: int = 60,
-    seed: int = 42,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+def generate_projection_chart_data(result: ModelResult, forecast_days: int = 20, n_sims: int = 200, lookback_days: int = 60, seed: int = 42) -> tuple[pd.DataFrame, pd.DataFrame]:
     rng = np.random.default_rng(seed)
-
-    hist = result.history.copy()
-    close = hist["Close"].dropna().copy()
-
+    close = result.history["Close"].dropna().copy()
     returns = close.pct_change().dropna()
     recent_returns = returns.tail(lookback_days)
     if len(recent_returns) < 20:
         recent_returns = returns.tail(min(len(returns), 60))
-
     base_mu = float(recent_returns.mean())
-    sigma = float(recent_returns.std())
-    sigma = max(sigma, 0.0001)
-
+    sigma = max(float(recent_returns.std()), 0.0001)
     tilt = (result.next_day_up_probability - 0.5) * sigma * 0.5
     drift = base_mu + tilt
-
     last_price = float(close.iloc[-1])
     future_index = pd.bdate_range(start=close.index[-1] + pd.Timedelta(days=1), periods=forecast_days)
-
     paths = np.zeros((forecast_days, n_sims))
     for s in range(n_sims):
         price = last_price
@@ -579,14 +446,11 @@ def generate_projection_chart_data(
             shock = rng.normal(drift, sigma)
             price = max(0.01, price * (1 + shock))
             paths[day, s] = price
-
     path_df = pd.DataFrame(paths, index=future_index, columns=[f"path_{i+1}" for i in range(n_sims)])
-
     summary = pd.DataFrame(index=future_index)
     summary["Median"] = path_df.median(axis=1)
     summary["Low Band (10%)"] = path_df.quantile(0.10, axis=1)
     summary["High Band (90%)"] = path_df.quantile(0.90, axis=1)
     summary["Bull Case (95%)"] = path_df.quantile(0.95, axis=1)
     summary["Bear Case (5%)"] = path_df.quantile(0.05, axis=1)
-
     return summary, path_df

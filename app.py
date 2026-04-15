@@ -15,14 +15,37 @@ from predictor import generate_projection_chart_data, train_predict_for_ticker
 
 APP_URL = "https://rotrivex-systems-rbtustwa2cfqcegsrs4zem.streamlit.app/"
 
+st.set_page_config(page_title="Stock Predictor", layout="wide")
+
+st.markdown("""
+<style>
+.stApp { background: linear-gradient(180deg, #0b1220 0%, #101828 100%); color: #f8fafc; }
+.main .block-container { max-width: 1100px; padding-top: 0.8rem; padding-bottom: 2rem; }
+.hero, .section-card { padding: 0.85rem; border: 1px solid #223046; border-radius: 14px; background: #111827; margin-bottom: 0.75rem; }
+.signal-buy, .signal-sell, .signal-watch { padding: .58rem .74rem; border-radius: 12px; font-weight: 800; text-align: center; margin-bottom: .7rem; }
+.signal-buy { background: #0b3b2e; color: #6ee7b7; }
+.signal-sell { background: #4c1717; color: #fca5a5; }
+.signal-watch { background: #5a3b10; color: #fcd34d; }
+.headline-card { padding: .68rem .72rem; border: 1px solid #223046; border-radius: 12px; background: #0f172a; margin-bottom: .45rem; }
+.flag { padding: .32rem .52rem; border-radius: 999px; display: inline-block; margin: .12rem .14rem .12rem 0; background: #1b2638; border: 1px solid #314158; color: #e5edf8; font-size: .76rem; }
+[data-testid="stMetric"] { background: #111827; border: 1px solid #223046; border-radius: 12px; padding: .4rem .46rem; }
+.stTabs [data-baseweb="tab"] { background: #162032; border-radius: 10px 10px 0 0; color: #d9e3f0; }
+.stTabs [aria-selected="true"] { background: #24324a !important; }
+</style>
+""", unsafe_allow_html=True)
+
+
+def safe_attr(obj, name, default):
+    return getattr(obj, name, default)
+
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_live_headlines(ticker: str, limit: int = 8) -> list[dict]:
     query = urllib.parse.quote(f"{ticker} stock")
     url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
-    items: list[dict] = []
+    items = []
     try:
-        response = requests.get(url, timeout=15)
+        response = requests.get(url, timeout=12)
         response.raise_for_status()
         root = ET.fromstring(response.content)
         channel = root.find("channel")
@@ -35,14 +58,7 @@ def fetch_live_headlines(ticker: str, limit: int = 8) -> list[dict]:
             source_el = item.find("source")
             source = source_el.text.strip() if source_el is not None and source_el.text else ""
             if title:
-                items.append(
-                    {
-                        "title": title,
-                        "link": link,
-                        "source": source,
-                        "published": pub_date,
-                    }
-                )
+                items.append({"title": title, "link": link, "source": source, "published": pub_date})
     except Exception:
         return []
     return items
@@ -56,26 +72,12 @@ def build_qr_code(url: str) -> bytes:
     return buf.getvalue()
 
 
-@st.cache_data(ttl=1200, show_spinner=False)
-def run_dashboard_data(
-    ticker: str,
-    period: str,
-    threshold: float,
-    forecast_days: int,
-    n_sims: int,
-):
+@st.cache_data(ttl=1800, show_spinner=False)
+def run_dashboard(ticker: str, period: str, threshold: float, forecast_days: int, n_sims: int):
     result = train_predict_for_ticker(ticker, period=period, threshold=threshold)
-    summary, _ = generate_projection_chart_data(
-        result,
-        forecast_days=forecast_days,
-        n_sims=n_sims,
-    )
+    summary, _ = generate_projection_chart_data(result, forecast_days=forecast_days, n_sims=n_sims)
     headlines = fetch_live_headlines(ticker, limit=8)
     return result, summary, headlines
-
-
-def safe_attr(obj, name, default):
-    return getattr(obj, name, default)
 
 
 def signal_class(signal: str) -> str:
@@ -88,324 +90,118 @@ def build_candlestick_chart(hist: pd.DataFrame, result) -> go.Figure:
     current_price = safe_attr(result, "latest_close", float(chart_data["Close"].iloc[-1]))
     support = safe_attr(result, "support_level", float(chart_data["Low"].tail(30).min()))
     resistance = safe_attr(result, "resistance_level", float(chart_data["High"].tail(30).max()))
-
     fig = go.Figure()
-    fig.add_trace(
-        go.Candlestick(
-            x=chart_data.index,
-            open=chart_data["Open"],
-            high=chart_data["High"],
-            low=chart_data["Low"],
-            close=chart_data["Close"],
-            name="Price",
-            increasing_line_color="#34d399",
-            decreasing_line_color="#f87171",
-            increasing_fillcolor="#34d399",
-            decreasing_fillcolor="#f87171",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=chart_data.index,
-            y=chart_data["SMA20"],
-            mode="lines",
-            name="20D Avg",
-            line=dict(color="#60a5fa", width=2),
-        )
-    )
-    for y_value, label, color in [
-        (current_price, "Current", "#cbd5e1"),
-        (support, "Support", "#f59e0b"),
-        (resistance, "Resistance", "#a78bfa"),
-    ]:
-        fig.add_hline(
-            y=y_value,
-            line_dash="dot",
-            line_color=color,
-            line_width=1.0,
-            annotation_text=label,
-            annotation_position="right",
-            annotation_font_color=color,
-        )
-    fig.update_layout(
-        title=f"{safe_attr(result, 'ticker', 'Ticker')} Price",
-        height=360,
-        xaxis_rangeslider_visible=False,
-        template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="#0f172a",
-        margin=dict(l=8, r=8, t=38, b=8),
-        font=dict(color="#e5edf8"),
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0),
-    )
-    fig.update_xaxes(showgrid=False, zeroline=False, title=None)
-    fig.update_yaxes(gridcolor="rgba(148,163,184,0.12)", zeroline=False, title=None)
+    fig.add_trace(go.Candlestick(x=chart_data.index, open=chart_data["Open"], high=chart_data["High"], low=chart_data["Low"], close=chart_data["Close"], name="Price"))
+    fig.add_trace(go.Scatter(x=chart_data.index, y=chart_data["SMA20"], mode="lines", name="20D Avg"))
+    fig.add_hline(y=current_price, line_dash="dot", annotation_text="Current", annotation_position="right")
+    fig.add_hline(y=support, line_dash="dot", annotation_text="Support", annotation_position="right")
+    fig.add_hline(y=resistance, line_dash="dot", annotation_text="Resistance", annotation_position="right")
+    fig.update_layout(height=360, xaxis_rangeslider_visible=False, template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#0f172a", margin=dict(l=8, r=8, t=38, b=8))
     return fig
 
 
 def build_projection_chart(summary: pd.DataFrame, current_price: float) -> go.Figure:
     fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=summary.index,
-            y=summary["High Band (90%)"],
-            mode="lines",
-            line=dict(color="rgba(96,165,250,0.0)", width=0),
-            showlegend=False,
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=summary.index,
-            y=summary["Low Band (10%)"],
-            mode="lines",
-            fill="tonexty",
-            fillcolor="rgba(96,165,250,0.18)",
-            line=dict(color="rgba(96,165,250,0.0)", width=0),
-            name="Projected Range",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=summary.index,
-            y=summary["Median"],
-            mode="lines",
-            name="Median Path",
-            line=dict(color="#60a5fa", width=3),
-        )
-    )
-    fig.add_hline(
-        y=current_price,
-        line_dash="dot",
-        line_color="#cbd5e1",
-        line_width=1.0,
-        annotation_text="Current",
-        annotation_position="right",
-        annotation_font_color="#cbd5e1",
-    )
-    fig.update_layout(
-        title="Projection Range",
-        height=250,
-        template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="#0f172a",
-        margin=dict(l=8, r=8, t=38, b=8),
-        font=dict(color="#e5edf8"),
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0),
-    )
-    fig.update_xaxes(showgrid=False, zeroline=False, title=None)
-    fig.update_yaxes(gridcolor="rgba(148,163,184,0.12)", zeroline=False, title=None)
+    fig.add_trace(go.Scatter(x=summary.index, y=summary["High Band (90%)"], mode="lines", line=dict(width=0), showlegend=False))
+    fig.add_trace(go.Scatter(x=summary.index, y=summary["Low Band (10%)"], mode="lines", fill="tonexty", name="Projected Range"))
+    fig.add_trace(go.Scatter(x=summary.index, y=summary["Median"], mode="lines", name="Median Path"))
+    fig.add_hline(y=current_price, line_dash="dot", annotation_text="Current", annotation_position="right")
+    fig.update_layout(height=260, template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#0f172a", margin=dict(l=8, r=8, t=38, b=8))
     return fig
 
 
-def build_simple_gauge_html(title: str, value: float, min_value: float, max_value: float, value_fmt: str) -> str:
-    pct = 0.0
-    if max_value > min_value:
-        pct = (value - min_value) / (max_value - min_value)
-    pct = max(0.0, min(1.0, pct))
-    deg = 180 * pct
-
-    if value_fmt == "pct0":
-        display_value = f"{value:.0f}"
-    elif value_fmt == "float2":
-        display_value = f"{value:.2f}"
-    else:
-        display_value = str(value)
-
-    return f"""
-    <div class="indicator-card">
-        <div class="indicator-title">{title}</div>
-        <div class="indicator-wrap">
-            <div class="indicator-arch-base"></div>
-            <div class="indicator-arch-fill">
-                <div style="
-                    position:absolute;
-                    inset:0;
-                    background:conic-gradient(from 180deg, #60a5fa 0deg, #60a5fa {deg}deg, transparent {deg}deg, transparent 180deg);
-                    -webkit-mask: radial-gradient(circle at 50% 100%, transparent 44px, black 45px);
-                    mask: radial-gradient(circle at 50% 100%, transparent 44px, black 45px);
-                "></div>
-            </div>
-            <div class="indicator-value">{display_value}</div>
-        </div>
-    </div>
-    """
-
-
-st.set_page_config(page_title="Stock Predictor", layout="wide", initial_sidebar_state="expanded")
-
-st.markdown(
-    """
-<style>
-.stApp { background: linear-gradient(180deg, #0b1220 0%, #101828 100%); color: #f8fafc; }
-.main .block-container { padding-top: 0.6rem; padding-bottom: 3rem; max-width: 1020px; }
-h1, h2, h3 { color: #f8fafc !important; }
-.hero, .section-card, .headline-card { padding: 0.8rem; border: 1px solid #223046; border-radius: 14px; background: #111827; margin-bottom: 0.7rem; }
-.signal-buy, .signal-sell, .signal-watch { padding: 0.65rem 0.8rem; border-radius: 12px; font-weight: 800; text-align: center; margin-bottom: 0.6rem; }
-.signal-buy { background: #0b3b2e; color: #6ee7b7; border: 1px solid #14532d; }
-.signal-sell { background: #4c1717; color: #fca5a5; border: 1px solid #7f1d1d; }
-.signal-watch { background: #5a3b10; color: #fcd34d; border: 1px solid #92400e; }
-.headline-source { color: #93c5fd; font-size: 0.78rem; font-weight: 700; }
-.indicator-card { padding: 0.45rem; border: 1px solid #223046; border-radius: 12px; background: #0f172a; margin-bottom: 0.45rem; }
-.indicator-title { color: #93c5fd; font-size: 0.78rem; font-weight: 700; text-align: center; }
-.indicator-wrap { position: relative; width: 100%; max-width: 180px; height: 100px; margin: 0 auto; }
-.indicator-arch-base, .indicator-arch-fill { position: absolute; left: 50%; top: 8px; transform: translateX(-50%); width: 148px; height: 74px; border-top-left-radius: 148px; border-top-right-radius: 148px; border-bottom: 0; box-sizing: border-box; overflow: hidden; }
-.indicator-arch-base { border: 10px solid #223046; }
-.indicator-arch-fill { border: 10px solid transparent; }
-.indicator-value { position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); color: #f8fafc; font-size: 1rem; font-weight: 800; text-align: center; width: 100%; }
-@media (max-width: 768px) {
-  .main .block-container { padding-left: 0.5rem; padding-right: 0.5rem; }
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-query_ticker = str(st.query_params.get("ticker", "AAPL")).strip().upper() if st.query_params.get("ticker") else "AAPL"
-
-if "active_ticker" not in st.session_state:
-    st.session_state.active_ticker = query_ticker
-
-header_left, header_right = st.columns([3, 1])
-with header_left:
-    st.markdown('<div class="hero">', unsafe_allow_html=True)
-    st.title("Stock Predictor")
-    st.caption("Simplified Streamlit dashboard")
-    st.markdown("</div>", unsafe_allow_html=True)
-with header_right:
-    st.link_button("Share App", APP_URL, use_container_width=True)
+st.markdown('<div class="hero"><h1>Stock Predictor</h1><div>Fast Streamlit build with Yahoo fallback.</div></div>', unsafe_allow_html=True)
 
 with st.sidebar:
     with st.form("controls"):
-        search_ticker = st.text_input("Search ticker", value=st.session_state.active_ticker).strip().upper()
-        period = st.selectbox("History period", options=["6mo", "1y", "2y", "5y"], index=2)
+        search_ticker = st.text_input("Search ticker", value="AAPL").strip().upper()
+        period = st.selectbox("History period", options=["6mo", "1y", "2y", "5y"], index=1)
         threshold = st.slider("Signal threshold", min_value=0.50, max_value=0.75, value=0.55, step=0.01)
         forecast_days = st.slider("Projection days", min_value=5, max_value=60, value=20, step=5)
         n_sims = st.slider("Projection paths", min_value=50, max_value=500, value=200, step=50)
-        submitted = st.form_submit_button("Run dashboard", use_container_width=True)
+        run = st.form_submit_button("Run dashboard", use_container_width=True)
 
-focus = search_ticker or st.session_state.active_ticker or "AAPL"
-if submitted:
-    st.session_state.active_ticker = focus
-    st.query_params["ticker"] = focus
+if "last_run" not in st.session_state:
+    st.session_state.last_run = ("AAPL", "1y", 0.55, 20, 200)
 
-result = None
-summary = None
-live_headlines: list[dict] = []
-error_text = None
+if run:
+    st.session_state.last_run = (search_ticker or "AAPL", period, threshold, forecast_days, n_sims)
+
+ticker, period, threshold, forecast_days, n_sims = st.session_state.last_run
 
 try:
-    result, summary, live_headlines = run_dashboard_data(
-        st.session_state.active_ticker,
-        period,
-        threshold,
-        forecast_days,
-        n_sims,
-    )
+    with st.spinner(f"Loading {ticker}..."):
+        result, summary, live_headlines = run_dashboard(ticker, period, threshold, forecast_days, n_sims)
 except Exception as exc:
-    error_text = (
-        f"Could not load market data for {st.session_state.active_ticker}. "
-        f"Yahoo Finance timed out or returned incomplete data. Details: {exc}"
-    )
+    st.error(f"Could not load market data for {ticker}. Details: {exc}")
+    st.stop()
 
-if error_text:
-    st.error(error_text)
+st.markdown(f'<div class="{signal_class(safe_attr(result, "model_signal", "WATCH"))}">{safe_attr(result, "model_signal", "WATCH")}</div>', unsafe_allow_html=True)
+st.caption(f"Data source: {safe_attr(result, 'data_source', 'Unknown')}")
 
-if result is not None and summary is not None:
-    st.markdown(
-        f'<div class="{signal_class(safe_attr(result, "model_signal", "WATCH"))}">{safe_attr(result, "model_signal", "WATCH")}</div>',
-        unsafe_allow_html=True,
-    )
+mc1, mc2, mc3, mc4 = st.columns(4)
+mc1.metric("Price", f"${safe_attr(result, 'latest_close', 0.0):,.2f}")
+mc2.metric("Mood", safe_attr(result, "mood", "Neutral"))
+mc3.metric("Up probability", f"{safe_attr(result, 'next_day_up_probability', 0.5):.2%}")
+mc4.metric("Accuracy", f"{safe_attr(result, 'holdout_accuracy', 0.0):.2%}")
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Price", f"${safe_attr(result, 'latest_close', 0.0):,.2f}")
-    m2.metric("Mood", safe_attr(result, "mood", "Neutral"))
-    m3.metric("Up probability", f"{safe_attr(result, 'next_day_up_probability', 0.5):.2%}")
-    m4.metric("Accuracy", f"{safe_attr(result, 'holdout_accuracy', 0.0):.2%}")
+md1, md2, md3, md4 = st.columns(4)
+md1.metric("Momentum", f"{safe_attr(result, 'momentum_20d', 0.0):.2%}")
+md2.metric("Volume", f"{safe_attr(result, 'volume_ratio', 1.0):.2f}x")
+md3.metric("News tone", safe_attr(result, "sentiment_label", "Neutral"))
+md4.metric("Earnings", safe_attr(result, "earnings_flag", "No date found"))
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Details", "Headlines", "Share"])
+tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Details", "Headlines", "Share"])
 
-    with tab1:
-        st.plotly_chart(build_candlestick_chart(result.history, result), use_container_width=True)
-        st.plotly_chart(build_projection_chart(summary, safe_attr(result, "latest_close", 0.0)), use_container_width=True)
+with tab1:
+    st.plotly_chart(build_candlestick_chart(result.history, result), use_container_width=True)
+    st.plotly_chart(build_projection_chart(summary, safe_attr(result, "latest_close", 0.0)), use_container_width=True)
 
-    with tab2:
-        left, right = st.columns(2)
-        with left:
-            st.markdown('<div class="section-card">', unsafe_allow_html=True)
-            st.subheader("Indicators")
-            rsi_value = max(0, min(100, safe_attr(result, "rsi_14", 50.0)))
-            sentiment_value = max(-1, min(1, safe_attr(result, "sentiment_score", 0.0)))
-            g1, g2 = st.columns(2)
-            with g1:
-                st.markdown(build_simple_gauge_html("RSI", rsi_value, 0, 100, "pct0"), unsafe_allow_html=True)
-            with g2:
-                st.markdown(build_simple_gauge_html("News Sentiment", sentiment_value, -1, 1, "float2"), unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-            st.markdown('<div class="section-card">', unsafe_allow_html=True)
-            st.subheader("Key levels")
-            levels_df = pd.DataFrame(
-                {
-                    "Item": ["Support", "Resistance", "Stop loss", "Target 1", "Target 2"],
-                    "Value": [
-                        safe_attr(result, "support_level", 0.0),
-                        safe_attr(result, "resistance_level", 0.0),
-                        safe_attr(result, "stop_loss", 0.0),
-                        safe_attr(result, "target_1", 0.0),
-                        safe_attr(result, "target_2", 0.0),
-                    ],
-                }
-            )
-            levels_df["Value"] = levels_df["Value"].map(lambda x: f"${x:,.2f}")
-            st.dataframe(levels_df, use_container_width=True, hide_index=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        with right:
-            st.markdown('<div class="section-card">', unsafe_allow_html=True)
-            st.subheader("Model summary")
-            rsi = safe_attr(result, "rsi_14", 50.0)
-            notes = [
-                f"Signal is {safe_attr(result, 'model_signal', 'WATCH')}.",
-                f"RSI is {rsi:.1f}.",
-                f"Momentum over 20 days is {safe_attr(result, 'momentum_20d', 0.0):.2%}.",
-                f"Volume ratio is {safe_attr(result, 'volume_ratio', 1.0):.2f}x.",
-                f"Earnings status is {safe_attr(result, 'earnings_flag', 'No date found')}."
-            ]
-            st.markdown("<ul>" + "".join([f"<li>{n}</li>" for n in notes]) + "</ul>", unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-    with tab3:
-        if live_headlines:
-            for item in live_headlines:
-                source = item.get("source", "")
-                published = item.get("published", "")
-                title = item.get("title", "")
-                link = item.get("link", "")
-                source_line = f"{source} | {published}" if source and published else source or published
-                st.markdown(
-                    f"""
-                    <div class="headline-card">
-                        <div class="headline-source">{source_line}</div>
-                        <div style="margin-top:.22rem;">
-                            <a href="{link}" target="_blank" style="color:#f8fafc; text-decoration:none; font-weight:600;">{title}</a>
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-        else:
-            st.info("No headlines returned right now.")
-
-    with tab4:
-        ticker_url = f"{APP_URL}?ticker={st.session_state.active_ticker}"
+with tab2:
+    left, right = st.columns(2)
+    with left:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        st.subheader("Share this ticker")
-        st.code(ticker_url, language=None)
-        st.link_button("Open ticker link", ticker_url, use_container_width=True)
-        st.image(build_qr_code(ticker_url), caption="Scan to open this ticker", width=160)
-        st.markdown("</div>", unsafe_allow_html=True)
-else:
-    st.info("Enter a ticker and run the dashboard.")
+        st.subheader("Key levels")
+        levels_df = pd.DataFrame({
+            "Item": ["Support", "Resistance", "Stop loss", "Target 1", "Target 2"],
+            "Value": [safe_attr(result, "support_level", 0.0), safe_attr(result, "resistance_level", 0.0), safe_attr(result, "stop_loss", 0.0), safe_attr(result, "target_1", 0.0), safe_attr(result, "target_2", 0.0)],
+        })
+        levels_df["Value"] = levels_df["Value"].map(lambda x: f"${x:,.2f}")
+        st.dataframe(levels_df, use_container_width=True, hide_index=True)
+        st.markdown("Flags")
+        st.markdown("".join([f'<span class="flag">{flag}</span>' for flag in safe_attr(result, "watchlist_flags", [])]), unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with right:
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.subheader("Model summary")
+        rsi = safe_attr(result, "rsi_14", 50.0)
+        notes = [
+            f"Signal is {safe_attr(result, 'model_signal', 'WATCH')}",
+            f"RSI is {rsi:.1f}",
+            f"Price vs 20D average: {'above' if safe_attr(result, 'latest_close', 0.0) > safe_attr(result, 'sma20', 0.0) else 'below'}",
+            f"MACD vs signal: {'above' if safe_attr(result, 'macd', 0.0) > safe_attr(result, 'macd_signal', 0.0) else 'below'}",
+            f"Data source used: {safe_attr(result, 'data_source', 'Unknown')}",
+        ]
+        for n in notes:
+            st.write("-", n)
+        feat_df = pd.DataFrame(safe_attr(result, "top_features", []), columns=["Feature", "Importance"])
+        if not feat_df.empty:
+            st.dataframe(feat_df, use_container_width=True, hide_index=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+with tab3:
+    if live_headlines:
+        for item in live_headlines:
+            source_line = " - ".join([x for x in [item.get("source", ""), item.get("published", "")] if x])
+            st.markdown(f'<div class="headline-card"><div>{source_line}</div><div style="margin-top:.2rem;"><a href="{item.get("link", "")}" target="_blank">{item.get("title", "")}</a></div></div>', unsafe_allow_html=True)
+    else:
+        st.write("No live headlines were returned right now.")
+
+with tab4:
+    ticker_url = f"{APP_URL}?ticker={ticker}"
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("Share this ticker")
+    st.code(ticker_url, language=None)
+    st.link_button("Open direct ticker link", ticker_url, use_container_width=True)
+    st.image(build_qr_code(ticker_url), caption="Scan to open this ticker", width=160)
+    st.markdown('</div>', unsafe_allow_html=True)
