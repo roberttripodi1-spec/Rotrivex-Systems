@@ -1,20 +1,18 @@
-# Stock Predictor Streamlit Rebuild
+# Stock Predictor Clean Rebuild
 
-This package is a clean Streamlit deployment set.
+Full clean rebuild with:
+- single ticker search
+- same-tab green/red S&P 500 movers
+- auto-run when a mover is tapped
+- details, headlines, and share pages
+- mobile-first spacing
+- hamburger-style sidebar toggle
+- bottom navigation
+- custom indicator gauges for mobile
+- feature sanitization in the predictor
 
-## Files
-- `app.py` — main Streamlit app
-- `predictor.py` — model and data pipeline
-- `screen_stocks.py` — CLI screener
-- `requirements.txt` — Python dependencies
 
-## Deploy on Streamlit Cloud
-1. Put all files in the repo root.
-2. Set the main file path to `app.py`.
-3. Redeploy.
-
-## Run locally
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
+## v15 reliability patch
+- Added Yahoo Finance retry + timeout handling in `predictor.py`.
+- Added graceful error handling in `app.py` when market data requests fail.
+- Default history period now favors lighter requests.

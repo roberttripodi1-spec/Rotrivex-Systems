@@ -101,10 +101,42 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def download_history(ticker: str, period: str = "5y") -> pd.DataFrame:
-    data = yf.download(ticker.upper().strip(), period=period, auto_adjust=True, progress=False)
-    if data.empty:
-        raise ValueError(f"No data returned for {ticker}")
-    return normalize_columns(data)
+    t = ticker.upper().strip()
+    attempts = [
+        {"period": period, "timeout": 30},
+        {"period": period, "timeout": 45},
+        {"period": "2y", "timeout": 30},
+        {"period": "1y", "timeout": 30},
+        {"period": "6mo", "timeout": 20},
+    ]
+
+    last_error = None
+    for attempt in attempts:
+        try:
+            data = yf.download(
+                t,
+                period=attempt["period"],
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+                timeout=attempt["timeout"],
+                repair=True,
+            )
+            data = normalize_columns(data)
+            if data is not None and not data.empty:
+                return data
+        except Exception as exc:
+            last_error = exc
+
+    if last_error is not None:
+        raise ValueError(
+            f"Market data request timed out or failed for {t}. "
+            f"Yahoo Finance did not return usable data after multiple retries."
+        ) from last_error
+
+    raise ValueError(
+        f"No market data returned for {t}. Try again in a minute or use a shorter history period."
+    )
 
 
 def train_test_split_time(data: pd.DataFrame, train_size: float = 0.8):
